@@ -1,0 +1,105 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    RVRepairVan - MelonLoader mod for Schedule I.
+    Dual-backend capable (extends the Mimesis-InventoryExpansion template):
+      net6.0          => IL2CPP backend  (Backend=il2cpp, refs from Workspace/lib/il2cpp)
+      netstandard2.1  => Mono   backend  (Backend=mono,   refs from Workspace/lib/mono)
+    Phase 1 builds IL2CPP only; the netstandard2.1 target is enabled once the Mono libs exist.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <!-- Enable both once Mono libs are captured (Steam 'alternate' branch):
+         <TargetFrameworks>net6.0;netstandard2.1</TargetFrameworks> -->
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>RVRepairVan</RootNamespace>
+    <AssemblyName>RVRepairVan</AssemblyName>
+    <NeutralLanguage>en-US</NeutralLanguage>
+    <Version>2.0.0</Version>
+    <AssemblyVersion>2.0.0.0</AssemblyVersion>
+    <FileVersion>2.0.0.0</FileVersion>
+    <!-- Suppress MSB3277/MSB3245 noise from il2cpp interop transitive refs -->
+    <NoWarn>$(NoWarn);MSB3277;MSB3245</NoWarn>
+
+    <!-- Workspace lib roots (mirrors Mimesis ../Workspace/lib) -->
+    <WorkspaceLibPath Condition="'$(WorkspaceLibPath)' == ''">$(MSBuildThisFileDirectory)../Workspace/lib</WorkspaceLibPath>
+    <ModManagerPath Condition="'$(ModManagerPath)' == ''">$(WorkspaceLibPath)/modmanager</ModManagerPath>
+    <ModsDirectory Condition="'$(ModsDirectory)' == ''">D:\Launcher\SteamLibrary\steamapps\common\Schedule I\Mods</ModsDirectory>
+  </PropertyGroup>
+
+  <!-- Backend selection derived from the active TargetFramework -->
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net6.0'">
+    <Backend>il2cpp</Backend>
+    <DefineConstants>$(DefineConstants);IL2CPP</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)' == 'netstandard2.1'">
+    <Backend>mono</Backend>
+    <DefineConstants>$(DefineConstants);MONO</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup>
+    <GameManagedPath>$(WorkspaceLibPath)/$(Backend)/game</GameManagedPath>
+    <MelonLoaderPath>$(WorkspaceLibPath)/$(Backend)/melonloader</MelonLoaderPath>
+  </PropertyGroup>
+
+  <!-- Backend-specific GlobalUsings: keep only the active backend's file -->
+  <ItemGroup>
+    <Compile Remove="Compat/GlobalUsings.Il2Cpp.cs" Condition="'$(Backend)' != 'il2cpp'" />
+    <Compile Remove="Compat/GlobalUsings.Mono.cs" Condition="'$(Backend)' != 'mono'" />
+  </ItemGroup>
+
+  <!-- Mod loader references (both backends) -->
+  <ItemGroup>
+    <Reference Include="MelonLoader">
+      <HintPath>$(MelonLoaderPath)/MelonLoader.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(MelonLoaderPath)/0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- IL2CPP-only references -->
+  <ItemGroup Condition="'$(Backend)' == 'il2cpp'">
+    <Reference Include="Il2CppInterop.Runtime">
+      <HintPath>$(MelonLoaderPath)/Il2CppInterop.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2Cppmscorlib">
+      <HintPath>$(GameManagedPath)/Il2Cppmscorlib.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2CppSystem">
+      <HintPath>$(GameManagedPath)/Il2CppSystem.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(GameManagedPath)/Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2CppFishNet.Runtime">
+      <HintPath>$(GameManagedPath)/Il2CppFishNet.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="S1API.Il2Cpp.MelonLoader">
+      <HintPath>$(WorkspaceLibPath)/il2cpp/s1api/S1API.Il2Cpp.MelonLoader.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(GameManagedPath)/UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="PostBuild" AfterTargets="Build" Condition="'$(OS)' == 'Windows_NT'">
+    <Exec Condition="Exists('$(ModsDirectory)')"
+          Command="cmd /c if exist &quot;$(ModsDirectory)&quot; copy /Y &quot;$(TargetPath)&quot; &quot;$(ModsDirectory)&quot;"
+          ContinueOnError="true" />
+  </Target>
+
+</Project>

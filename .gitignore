@@ -1,0 +1,6 @@
+.vs
+bin
+obj
+release
+*.zip
+thunderstore-package

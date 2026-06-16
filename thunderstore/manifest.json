@@ -1,0 +1,13 @@
+{
+  "name": "RVRepairVan",
+  "version_number": "2.0.0",
+  "website_url": "https://github.com/DooDesch/RVRepairVan",
+  "description": "Repair your destroyed RV in Schedule I - pay Ming, restore the van, guided by a repair quest.",
+  "dependencies": [
+    "LavaGang-MelonLoader-0.7.3",
+    "ifBars-S1API_Forked-3.0.22"
+  ],
+  "contributors": [
+    "DooDesch"
+  ]
+}
