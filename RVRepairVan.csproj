@@ -5,7 +5,7 @@
     Dual-backend capable (extends the Mimesis-InventoryExpansion template):
       net6.0          => IL2CPP backend  (Backend=il2cpp, refs from Workspace/lib/il2cpp)
       netstandard2.1  => Mono   backend  (Backend=mono,   refs from Workspace/lib/mono)
-    Phase 1 builds IL2CPP only; the netstandard2.1 target is enabled once the Mono libs exist.
+    Currently builds IL2CPP only; the netstandard2.1 target is enabled once the Mono libs exist.
   -->
 
   <PropertyGroup>
@@ -82,6 +82,10 @@
       <HintPath>$(GameManagedPath)/Assembly-CSharp.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="Il2CppScheduleOne.Core">
+      <HintPath>$(GameManagedPath)/Il2CppScheduleOne.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="Il2CppFishNet.Runtime">
       <HintPath>$(GameManagedPath)/Il2CppFishNet.Runtime.dll</HintPath>
       <Private>false</Private>
@@ -94,6 +98,24 @@
       <HintPath>$(GameManagedPath)/UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="UnityEngine.ImageConversionModule">
+      <HintPath>$(GameManagedPath)/UnityEngine.ImageConversionModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.AudioModule">
+      <HintPath>$(GameManagedPath)/UnityEngine.AudioModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Bundled assets, embedded so they ship inside the DLL - no extra files. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\quest_icon.png">
+      <LogicalName>RVRepairVan.quest_icon.png</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\repair.wav">
+      <LogicalName>RVRepairVan.repair.wav</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 
   <Target Name="PostBuild" AfterTargets="Build" Condition="'$(OS)' == 'Windows_NT'">

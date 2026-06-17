@@ -2,7 +2,7 @@
   "name": "RVRepairVan",
   "version_number": "2.0.0",
   "website_url": "https://github.com/DooDesch/RVRepairVan",
-  "description": "Repair your destroyed RV in Schedule I - pay Ming, restore the van, guided by a repair quest.",
+  "description": "Repair your wrecked RV in Schedule I - get the job from Mrs. Ming, pay Marco the mechanic, guided by a tracked quest with a repair cinematic.",
   "dependencies": [
     "LavaGang-MelonLoader-0.7.3",
     "ifBars-S1API_Forked-3.0.22"

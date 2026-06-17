@@ -5,6 +5,7 @@ using RVRepairVan.Config;
 using RVRepairVan.Dialogue;
 using RVRepairVan.Managers;
 using RVRepairVan.Persistence;
+using RVRepairVan.Quests;
 
 [assembly: MelonInfo(typeof(RVRepairVan.Core), "RVRepairVan", "2.0.0", "DooDesch", null)]
 [assembly: MelonGame("TVGS", "Schedule I")]
@@ -21,6 +22,10 @@ namespace RVRepairVan
         public static Core Instance { get; private set; }
         public static MelonLogger.Instance Log { get; private set; }
 
+        /// <summary>Debug-only trace log - compiled out of Release builds so the release log stays clean.</summary>
+        [System.Diagnostics.Conditional("DEBUG")]
+        public static void LogDebug(string msg) { Log?.Msg(msg); }
+
         public override void OnInitializeMelon()
         {
             Instance = this;
@@ -29,7 +34,7 @@ namespace RVRepairVan
             RVRepairVanPreferences.Initialize();
             HarmonyInstance.PatchAll();
 
-            Log.Msg($"RVRepairVan initialized. Enabled={RVRepairVanPreferences.Enabled}, RepairPrice={RVRepairVanPreferences.RepairPrice}");
+            Log.Msg($"RVRepairVan initialized. Enabled={RVRepairVanPreferences.Enabled}, Questline={RVRepairVanPreferences.QuestlineEnabled}, RepairPrice={RVRepairVanPreferences.RepairPrice}");
         }
 
         public override void OnSceneWasLoaded(int buildIndex, string sceneName)
@@ -39,12 +44,24 @@ namespace RVRepairVan
                 return;
             }
 
-            RVManager.Reset();
-            MarcoRepairDialogue.Reset();
-            MingQuestDialogue.Reset();
+            // A new game is loading - our save-bound state will be repopulated by S1API's OnLoaded. Mark it
+            // pending so the questline waits for the fresh values instead of acting on the previous session's.
+            RepairSave.BeginLoad();
 
-            MelonCoroutines.Start(MarcoRepairDialogue.SetupCoroutine());
-            MelonCoroutines.Start(MingQuestDialogue.SetupCoroutine());
+            RVManager.Reset();
+            RVRepairVan.Effects.RepairCinematic.ForceReset();   // un-black + unlock input if a prior cinematic was interrupted
+
+            if (RVRepairVanPreferences.QuestlineEnabled)
+            {
+                Questline.Reset();
+                Questline.Start();
+            }
+            else
+            {
+                MarcoRepairDialogue.Reset();
+                MelonCoroutines.Start(MarcoRepairDialogue.SetupCoroutine());
+            }
+
             MelonCoroutines.Start(RestoreRepairCoroutine());
         }
 
@@ -59,13 +76,20 @@ namespace RVRepairVan
             {
                 // Live-update Marco's repair choice label to the current price (no restart).
                 MarcoRepairDialogue.RefreshPrice();
+                Questline.RefreshPrice();
 
+#if DEBUG
+                // Debug helpers are compiled into Debug builds only - never shipped to players.
                 if (RVRepairVanPreferences.ConsumeDestroyRequest())
                 {
                     Log.Msg("[Debug] Destroy RV toggle on - wrecking the RV now.");
                     if (RVManager.Destroy())
                     {
+                        // Full reset so the questline re-runs from the top (debug re-test convenience).
                         RepairStateStore.SetRepaired(false);
+                        RepairStateStore.SetStage(0);
+                        RepairStateStore.SetSamples(0);
+                        RepairStateStore.SetDiscountTotal(0);
                     }
                 }
 
@@ -74,6 +98,20 @@ namespace RVRepairVan
                     S1API.Money.Money.ChangeCashBalance(RVRepairVanPreferences.DebugCashAmount, true, true);
                     Log.Msg("[Debug] Added " + MoneyManager.FormatAmount(RVRepairVanPreferences.DebugCashAmount) + " cash.");
                 }
+
+                if (RVRepairVanPreferences.ConsumeDumpRequest())
+                {
+                    RVManager.LogState();
+                    Questline.DumpNpcDiagnostics();
+                }
+
+                if (RVRepairVanPreferences.ConsumeTestCinematicRequest())
+                {
+                    Log.Msg("[Debug] Playing repair cinematic test.");
+                    RVRepairVan.Effects.RepairCinematic.Play(null, () => Log.Msg("[Debug] cinematic test done."),
+                        () => Questline.DebugGruntNearest());
+                }
+#endif
             }
             catch (Exception e)
             {
@@ -87,7 +125,12 @@ namespace RVRepairVan
         /// </summary>
         private static IEnumerator RestoreRepairCoroutine()
         {
-            yield return new WaitForSeconds(4f);
+            // Wait until our save-bound state has actually loaded (repaired flag is authoritative only then),
+            // up to ~10s, then let the base-game RV settle a moment before reading/repairing.
+            float waited = 0f;
+            while (!RepairSave.Loaded && waited < 10f) { yield return new WaitForSeconds(0.5f); waited += 0.5f; }
+            yield return new WaitForSeconds(2f);
+            RVManager.LogState();   // diagnostic: see the real RV state on load
 
             bool restore = false;
             try

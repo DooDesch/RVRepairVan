@@ -1,81 +1,26 @@
-using System;
-using System.IO;
-
 namespace RVRepairVan.Persistence
 {
     /// <summary>
-    /// Per-save persistence of the "RV was repaired" flag. The flag file lives inside
-    /// the current save folder (derived from SaveManager.PlayersSavePath), so repair
-    /// state stays scoped to a single save game and survives reloads.
+    /// Accessor for the questline's persisted state. Backs onto <see cref="RepairSave"/>, which S1API serialises
+    /// into the game save (written on game-save, read on load) - so reads/writes here are in-memory during play
+    /// and only hit disk when the player actually saves. This is what keeps our state in sync with the game's own
+    /// RV/quest state instead of an immediately-written json that could desync. If the Saveable instance does not
+    /// exist yet (very early, before the first load), reads return defaults and writes no-op.
     /// </summary>
     internal static class RepairStateStore
     {
-        private const string FileName = "rv_repairvan.json";
+        private static RepairSave S => RepairSave.Instance;
 
-        private static string StateFilePath()
-        {
-            try
-            {
-                SaveManager sm = SaveManager.Instance;
-                if (sm == null)
-                {
-                    return null;
-                }
+        internal static bool GetRepaired() => S != null && S.Repaired;
+        internal static void SetRepaired(bool repaired) { if (S != null) S.Repaired = repaired; }
 
-                string playersPath = sm.PlayersSavePath; // <save>/Players
-                if (string.IsNullOrEmpty(playersPath))
-                {
-                    return null;
-                }
+        internal static int GetStage() => S != null ? S.Stage : 0;
+        internal static void SetStage(int stage) { if (S != null) S.Stage = stage; }
 
-                string saveDir = Path.GetDirectoryName(playersPath);
-                if (string.IsNullOrEmpty(saveDir))
-                {
-                    return null;
-                }
+        internal static int GetSamples() => S != null ? S.Samples : 0;
+        internal static void SetSamples(int samples) { if (S != null) S.Samples = samples; }
 
-                return Path.Combine(saveDir, FileName);
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        internal static void SetRepaired(bool repaired)
-        {
-            string path = StateFilePath();
-            if (path == null)
-            {
-                return;
-            }
-
-            try
-            {
-                File.WriteAllText(path, "{\"repaired\":" + (repaired ? "true" : "false") + "}");
-            }
-            catch (Exception e)
-            {
-                Core.Log.Warning("[State] save failed: " + e.Message);
-            }
-        }
-
-        internal static bool GetRepaired()
-        {
-            string path = StateFilePath();
-            if (path == null || !File.Exists(path))
-            {
-                return false;
-            }
-
-            try
-            {
-                return File.ReadAllText(path).Contains("\"repaired\":true");
-            }
-            catch
-            {
-                return false;
-            }
-        }
+        internal static int GetDiscountTotal() => S != null ? S.Discount : 0;
+        internal static void SetDiscountTotal(int discount) { if (S != null) S.Discount = discount; }
     }
 }

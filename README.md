@@ -1,8 +1,11 @@
-# RVRepairVan - Repair Your RV
+# RVRepairVan - Get Your RV Back on the Road
 
 > 🛟 **Need help or found a bug?** Get support at [support.doodesch.de](https://support.doodesch.de).
 
-> Your RV got wrecked? Get it fixed. Talk to Ming to pick up the job, head to Marco the mechanic, pay the bill, and your RV is back on the road - guided by a proper tracked quest with journal and HUD.
+> Your RV got blown up in the intro? Now you can actually fix it. A proper tracked side
+> quest sends you from the motel manager to Mrs. Ming to Marco the mechanic, with real
+> errands, referral haggling, and a little repair cinematic at the end. Built on
+> [S1API](https://github.com/ifBars/S1API).
 
 ![Version](https://img.shields.io/badge/version-2.0.0-blue)
 ![Game](https://img.shields.io/badge/game-Schedule%20I-purple)
@@ -12,13 +15,27 @@
 
 ## Features
 
-- Repair your destroyed RV by talking to **Marco** the mechanic - he charges a configurable fee and restores the wrecked van to working order.
-- A guided **quest**: **Ming** hands you the job ("My RV got wrecked - what should I do?"), the objective points you to Marco, and finishing the repair completes the quest. Shows up in the journal/phone and the on-screen HUD tracker (built on [S1API](https://github.com/ifBars/S1API)).
-- **Configurable repair price** (default `$1,500`), read live - change it in settings and Marco's offer updates without a restart.
-- **Per-save persistence**: a repaired RV stays repaired across reloads, scoped to the individual save game.
-- Pays from your **cash** balance and only offers the repair while the RV is actually destroyed.
-- **Debug helpers** for testing without waiting for the story event: a one-shot *Destroy RV* toggle and a one-shot *Add $10,000* toggle.
-- Settings are exposed through the **Mod Manager & Phone App** UI (in-game) or `UserData/MelonPreferences.cfg`.
+- **"Back on the Road" questline** (default). After the RV is wrecked during the intro,
+  the quest starts on its own and points you to the motel manager (Donna), who sends you
+  to **Mrs. Ming**, who has you fetch a crate from a **dead drop** before she refers you
+  to **Marco** the mechanic at the docks.
+- **Native dialogue** via S1API: real in-conversation choices and replies, not floating
+  one-line bubbles, and it shows up in the journal and the on-screen HUD tracker.
+- **Referral pricing.** Marco quotes **$50,000** up front; tell him *"Mrs. Ming sent me"*
+  and it drops to **$10,000**. Optionally earn his trust (a second dead-drop pickup) to
+  hand over **packaged product samples** that shave the bill down further, to the floor.
+- **Real carried items.** The crate and package are actual items you pick up and carry
+  (with a proper icon and in-hand model). Lose one and the NPC charges a **$500** recovery
+  fee to continue.
+- **Repair cinematic.** When you pay, the screen fades to black, you hear Marco work on
+  it (and grumble), then it fades back and he tells you she is ready. Plays in both modes.
+- **Save-bound persistence.** Progress and the repaired RV are stored inside the game
+  save, so they stay in sync with the world: finishing without saving (or after a crash)
+  correctly reverts instead of leaving you stuck.
+- **Simple mode** (`QuestMode = Simple`): skip the story and just talk to Marco, pay the
+  flat repair price, and get the cinematic.
+- **Configurable** prices and discounts, read live - change them in settings and Marco's
+  offer updates without a restart.
 
 ## Requirements
 
@@ -26,54 +43,65 @@
 |-----------|------------------|
 | Schedule I | `0.4.5f2` (IL2CPP, current Steam public build) |
 | MelonLoader | `0.7.3+` |
-| S1API | [ifBars/S1API_Forked](https://thunderstore.io/c/schedule-i/p/ifBars/S1API_Forked/) `3.0.22+` (quest/money layer) |
-| Mod Manager & Phone App | [Prowiler, Nexus mods/397](https://www.nexusmods.com/schedule1/mods/397) - for the in-game settings UI |
+| S1API | [ifBars/S1API_Forked](https://thunderstore.io/c/schedule-i/p/ifBars/S1API_Forked/) (dialogue, items, dead drops, money, save system) |
+| Mod Manager & Phone App | [Prowiler, Nexus mods/397](https://www.nexusmods.com/schedule1/mods/397) - optional, for the in-game settings UI |
 
 ## Installation
 
-### Recommended: Thunderstore mod manager
+### Recommended: a Thunderstore mod manager
 
-Install through a Thunderstore mod manager such as [r2modman](https://thunderstore.io/package/ebkr/r2modman/) or [Gale](https://thunderstore.io/package/Kesomannen/GaleModManager/). It resolves the MelonLoader and S1API dependencies automatically. Install **Mod Manager & Phone App** from Nexus for the in-game settings UI.
+Install with a mod manager (r2modman / Gale) from the Schedule I community; the
+dependencies (MelonLoader, S1API) are pulled in automatically.
 
 ### Manual
 
-1. Install [MelonLoader 0.7.3](https://melonwiki.xyz/#/) into Schedule I.
-2. Install [S1API](https://thunderstore.io/c/schedule-i/p/ifBars/S1API_Forked/) (extract its `Mods/` and `Plugins/` into your `Schedule I` folder).
-3. (Recommended) Install [Mod Manager & Phone App](https://www.nexusmods.com/schedule1/mods/397).
-4. Download the latest `RVRepairVan.dll` from the [releases page](../../releases) and drop it into `Schedule I/Mods/`.
-5. Launch the game once to generate the config at `UserData/MelonPreferences.cfg`.
+1. Install **MelonLoader 0.7.3** for Schedule I.
+2. Install **S1API** (its DLLs go in `Mods/` and `Plugins/` per its own instructions).
+3. Drop **`RVRepairVan.dll`** into your Schedule I `Mods/` folder.
+4. (Optional) Install **Mod Manager & Phone App** for the in-game settings UI.
 
 ## Configuration
 
-Stored in `UserData/MelonPreferences.cfg` under the `[RVRepairVan_01_Main]` category (display name **RV Repair Van**). Also editable in-game via the Mod Manager & Phone App.
+Settings live in the **Mod Manager & Phone App** UI in-game, or in
+`UserData/MelonPreferences.cfg` under `RVRepairVan_01_Main`.
 
-| Option | Description | Default | Values |
-|--------|-------------|---------|--------|
-| `Enabled` | Enable the RV repair feature. | `true` | `true` / `false` |
-| `RepairPrice` | Cash Marco charges to repair the RV. Applied live - Marco's offer updates on save. | `1500` | any non-negative integer |
-| `DestroyRvDebug` | One-shot debug: wreck the RV so you can test the repair without the story event. Auto-resets to off. | `false` | `true` / `false` |
-| `AddCashDebug` | One-shot debug: give yourself `$10,000` (only while a save is loaded). Auto-resets to off. | `false` | `true` / `false` |
+| Setting | Default | What it does |
+|---|---|---|
+| `Enabled` | `true` | Master on/off for the repair feature. |
+| `QuestMode` | `Questline` | `Questline` = the full Donna -> Ming -> Marco story. `Simple` = just talk to Marco and pay. |
+| `RepairPrice` | `1500` | Simple-mode price, and the price floor the questline can never go below. |
+| `BasePriceNoReferral` | `50000` | Questline price if you walk straight to Marco. |
+| `BasePriceWithReferral` | `10000` | Questline price after you drop Mrs. Ming's name. |
+| `MinSampleDiscount` | `100` | Smallest price cut a single packaged sample can give. |
+| `MaxSampleDiscount` | `500` | Largest price cut a single packaged sample can give. |
+
+Debug-only toggles (Destroy RV, Add $10,000, Dump state, Play repair cinematic) exist only
+in development builds and are not shipped in the release.
 
 ## Usage
 
-1. When your RV is destroyed, talk to **Ming** and pick *"My RV got wrecked - what should I do?"* to start the **Repair the RV** quest.
-2. Follow the quest marker to **Marco** the mechanic and choose *"Repair my RV ($…)"*.
-3. The fee is deducted from your cash and the RV is restored; the quest completes. The repair persists across reloads for that save.
+1. Play through the intro until the RV is wrecked and the early quests have begun.
+2. The **"Back on the Road"** quest appears and points you to the **motel manager**.
+3. Follow it: Donna -> **Mrs. Ming** (accept her errand, grab the crate from the dead drop,
+   bring it back) -> **Marco** at the body shop.
+4. Ask Marco to fix the RV, drop Ming's name to cut the price, optionally do his pickup and
+   hand over packaged samples for further discounts.
+5. **Pay** - enjoy the repair cinematic - then go **check on the RV**.
 
-To test quickly: toggle `AddCashDebug` for funds and `DestroyRvDebug` to wreck the RV on demand.
+Prefer no story? Set `QuestMode = Simple` and just pay Marco directly.
 
 ## Compatibility
 
-Built for Schedule I `0.4.5f2` (IL2CPP) / MelonLoader `0.7.3`. A Mono build (`alternate` Steam branch) is planned. Disable other RV-repair mods (e.g. PrimoBuddy's *RV Repair*) to avoid duplicate Marco dialogue.
+- Disable other RV-repair or Marco-dialogue mods to avoid duplicate or conflicting choices.
+- IL2CPP build only (current Steam public branch). A Mono build for the alternate branch is
+  planned.
 
-## Building (developers)
+## Credits
 
-```
-dotnet build -c Release
-```
+- **DooDesch** - mod author.
+- **[ifBars/S1API](https://github.com/ifBars/S1API)** - the modding API this is built on.
+- **Prowiler** - Mod Manager & Phone App (in-game settings UI).
 
-References are resolved from a sibling `../Workspace/lib/<backend>/` folder (game + MelonLoader + S1API assemblies); the backend (`il2cpp` / `mono`) is derived from the active TargetFramework. The PostBuild step copies `RVRepairVan.dll` into the game's `Mods/`. The project is structured after [Mimesis-InventoryExpansion](https://github.com/DooDesch/Mimesis-InventoryExpansion).
+## License
 
-## Credits / License
-
-Author: **DooDesch**. Built on [S1API](https://github.com/ifBars/S1API) (KaBooMa, ifBars & contributors) and integrates with **Mod Manager & Phone App** (Prowiler). Provided as-is under the MIT License. Contributions welcome via pull requests on the [repository](https://github.com/DooDesch/RVRepairVan).
+Provided as-is under the [MIT License](LICENSE.md).

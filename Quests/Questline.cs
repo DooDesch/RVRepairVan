@@ -1,0 +1,968 @@
+using System;
+using System.Collections;
+using Il2CppInterop.Runtime;
+using Il2CppScheduleOne.VoiceOver;   // EVOLineType / VOEmitter (Marco's grunt)
+using MelonLoader;
+using RVRepairVan.Config;
+using RVRepairVan.Managers;
+using RVRepairVan.Persistence;
+using S1API.Quests;
+using UnityEngine.Events;
+
+namespace RVRepairVan.Quests
+{
+    /// <summary>
+    /// "Back on the Road" - the configurable RV-repair questline (QuestMode = Questline). See
+    /// docs/QUESTLINE.md (player) and docs/QUEST-SCRIPT.md (exact trace).
+    /// Donna -> Ming (crate dead-drop errand) -> Marco (referral price + optional trust pickup + packaged
+    /// samples) -> pay -> check the RV. A single stage value drives the objective AND the price tier
+    /// (ReferralUsed / Trusted are derived from Stage). Progress persists per save via RepairStateStore.
+    /// </summary>
+    internal static class Questline
+    {
+        // Persisted stages (RepairStateStore.GetStage/SetStage). The stage encodes ALL progression, so the
+        // price tier is derived from it: the 10k referral price (ReferralUsed) at >= ReadyToPay, the sample
+        // discount (Trusted_) at >= Trusted.
+        private const int None = 0, Started = 1, AskedDonna = 2, MingErrand = 3, MingCrate = 4,
+                          Referred = 5, MarcoMet = 6, ReadyToPay = 7, Trusted = 8, Paid = 9, Done = 10;
+
+        // NPC ids in the game's registry (same ids S1API uses). Reliable lookup; see FindNpc().
+        private const string DonnaId = "donna_martin", MingId = "ming", MarcoId = "marco_baron";
+
+        // Custom carried items placed in the dead drops, and the fee if the player loses one.
+        private const string CrateId = "rv_ming_crate", PackageId = "rv_marco_package";
+        private const int LostPackageFee = 500;
+
+        // Loss-fallback lines (per NPC). Player admits the loss -> NPC demands $LostPackageFee -> pay or defer.
+        private const string MingAngry  = "You lost it? I don't lose things, and people who lose my things lose teeth. Five hundred buys you both back. Now.";
+        private const string MingPaid   = "Smart. We're square. Now go see Marco at the body shop down by the docks, and tell him Mrs. Ming sent you.";
+        private const string MingShort  = "Then don't come back until your hands are full.";
+        private const string MarcoAngry = "You did what? You walk in here empty-handed and waste my time. Five hundred, or the next thing that goes missing is you.";
+        private const string MarcoPaid  = "Good. Mess like that gets forgotten when the cash shows up. Bring me some of that good stuff now and then, and I'll keep shaving down the bill.";
+        private const string MarcoShort = "Clock's running. Come back with it.";
+
+        // Transient per-scene state.
+        private static bool _donnaDone, _mingDone, _marcoDone;   // dialogue injected per NPC (independent)
+        private static bool _pickupActive;       // Marco's trust pickup started
+        private static bool _hasPackage;         // Marco's package collected from the drop
+        private static Vector3 _dropPoint;       // Marco's package dead drop
+        private static S1API.DeadDrops.DeadDropInstance _drop;   // reserved dead drop for Marco's pickup
+        private static Vector3 _cratePoint;      // Ming's crate dead drop
+        private static S1API.DeadDrops.DeadDropInstance _crateDrop;  // reserved dead drop for Ming's crate
+        private static bool _cratePlaced, _pkgPlaced;   // a real item was placed in that drop (else proximity fallback)
+        private static bool _itemsRegistered;
+        private static int _gen;                 // scene generation - stops stale coroutines after a reload
+
+        private static Transform _donnaT, _mingT, _marcoT;
+        private static DialogueController.DialogueChoice _marcoRepairChoice;
+
+        private static int Stage { get => RepairStateStore.GetStage(); set => RepairStateStore.SetStage(value); }
+        private static int Samples { get => RepairStateStore.GetSamples(); set => RepairStateStore.SetSamples(value); }
+        private static int DiscountTotal { get => RepairStateStore.GetDiscountTotal(); set => RepairStateStore.SetDiscountTotal(value); }
+
+        private static bool MarcoGreeted => Stage >= MarcoMet;   // asked Marco "can you fix it"
+        private static bool ReferralUsed => Stage >= ReadyToPay;  // you actually told Marco - price is 10k
+        private static bool Trusted_ => Stage >= Trusted;         // did Marco's pickup - packaged samples unlocked
+        // A wrecked RV needs repairing - availability is driven purely by IsDestroyed().
+        private static bool Active => RVRepairVanPreferences.Enabled && RVManager.IsDestroyed();
+
+        internal static int CurrentPrice()
+        {
+            // Referral price (10k) only once you've told Marco "Mrs. Ming sent me" (Stage >= ReadyToPay); 50k before.
+            int basePrice = ReferralUsed ? RVRepairVanPreferences.BasePriceWithReferral : RVRepairVanPreferences.BasePriceNoReferral;
+            return Mathf.Max(RVRepairVanPreferences.RepairPrice, basePrice - DiscountTotal);
+        }
+
+        // The repair questline only begins once the player is past the explosion beat: the RV blew up
+        // during "Welcome to Hyland Point", they reported it to Uncle Nelson by payphone, and "Getting
+        // Started" (rent the motel room) is now active/completed. Reading the vanilla quest state avoids the
+        // immersion break of the quest popping the instant the RV explodes.
+        private static bool ExplosionBeatPassed()
+        {
+            try
+            {
+                var gs = Il2CppScheduleOne.Quests.Quest.GetQuest("Getting Started");
+                if (gs != null && (gs.State == Il2CppScheduleOne.Quests.EQuestState.Active ||
+                                   gs.State == Il2CppScheduleOne.Quests.EQuestState.Completed))
+                    return true;
+                var wh = Il2CppScheduleOne.Quests.Quest.GetQuest("Welcome to Hyland Point");
+                if (wh != null && wh.State == Il2CppScheduleOne.Quests.EQuestState.Completed)
+                    return true;
+            }
+            catch { }
+            return false;
+        }
+
+        internal static void Reset()
+        {
+            _gen++;
+            ResetDiag();
+            _donnaDone = _mingDone = _marcoDone = false;
+            _pickupActive = false;
+            _hasPackage = false;
+            _drop = null;
+            _crateDrop = null;
+            _cratePlaced = _pkgPlaced = false;   // _itemsRegistered stays - registration persists across resets
+            _dropPoint = Vector3.zero;
+            _cratePoint = Vector3.zero;
+            _donnaT = _mingT = _marcoT = null;
+            _marcoRepairChoice = null;
+        }
+
+        internal static void Start()
+        {
+            MelonCoroutines.Start(SetupCoroutine());
+            MelonCoroutines.Start(ProximityCoroutine());
+            MelonCoroutines.Start(RestoreCoroutine());
+        }
+
+        /// <summary>After a save loads, re-create + re-sync the journal quest at the stored stage.</summary>
+        private static IEnumerator RestoreCoroutine()
+        {
+            yield return new WaitForSeconds(4f);
+            try { if (Active && Stage >= Started && Stage < Done) EnsureQuest(); }
+            catch (Exception e) { Core.Log.Warning("[Questline] restore failed: " + e.Message); }
+        }
+
+        private static IEnumerator SetupCoroutine()
+        {
+            int myGen = _gen;
+            int attempt = 0;
+            bool reported = false;
+            // Fast burst, then keep checking slowly the whole scene - NPCs like Donna spawn late.
+            while (myGen == _gen && !(_donnaDone && _mingDone && _marcoDone))
+            {
+                yield return new WaitForSeconds(attempt < 20 ? 2f : 10f);
+                attempt++;
+                TryInject();
+                if (!reported && attempt >= 20)
+                {
+                    reported = true;
+                    Core.LogDebug($"[Questline] initial setup: Donna={_donnaDone} Ming={_mingDone} Marco={_marcoDone} (keeps retrying any missing)");
+#if DEBUG
+                    DumpNpcDiagnostics();
+#endif
+                }
+            }
+            if (myGen == _gen)
+                Core.LogDebug($"[Questline] all NPC dialogue injected: Donna={_donnaDone} Ming={_mingDone} Marco={_marcoDone}");
+        }
+
+        // Inject each NPC independently, looked up by id in the game's NPC registry.
+        private static void TryInject()
+        {
+            try
+            {
+                if (!_donnaDone)  _donnaDone  = TryOne(DonnaId,  out _donnaT,  InjectDonna);
+                if (!_mingDone)   _mingDone   = TryOne(MingId,   out _mingT,   InjectMing);
+                if (!_marcoDone)  _marcoDone  = TryOne(MarcoId,  out _marcoT,  InjectMarco);
+            }
+            catch (Exception e)
+            {
+                Core.Log.Warning("[Questline] inject attempt failed: " + e.Message);
+            }
+        }
+
+        private static bool TryOne(string id, out Transform t, Action<DialogueController, NPC> inject)
+        {
+            NPC n = FindNpc(id);
+            DialogueController dc = ControllerOf(n, out t);
+            if (dc != null) { inject(dc, n); return true; }
+#if DEBUG
+            DiagOnce(id, n);
+#endif
+            return false;
+        }
+
+        private static void InjectDonna(DialogueController donna, NPC npc)
+        {
+            var reply = S1Container(npc, "rv_donna", b => b
+                .AddNode("ENTRY", "Do I look like a mechanic, sweetheart? Go ask Mrs. Ming over at the Chinese place. She knows people."));
+            AddChoice(donna, "My RV got blown up. Know anyone who can fix it?", 90,
+                () => Active && Stage == Started, OnAskDonna, reply);
+            Core.LogDebug("[Questline] Donna dialogue injected.");
+        }
+
+        private static void InjectMing(DialogueController ming, NPC npc)
+        {
+            // The errand offer is an in-dialogue sub-menu (accept / not now), no cash involved.
+            var offer = S1Container(npc, "rv_ming_offer", b => b
+                .AddNode("ENTRY",
+                    "Marco at the docks can fix almost anything. But favors move both ways. I have a crate waiting at a dead drop nearby. Bring it back, and I'll put in a word.",
+                    c => c.Add("MING_ACCEPT", "I'll grab it.", "MING_ACCEPTED")
+                          .Add("MING_DEFER", "Not right now.", "MING_DEFERRED"))
+                .AddNode("MING_ACCEPTED", "Good. Pick it up, bring it here, and don't open it.")
+                .AddNode("MING_DEFERRED", "Then your RV can stay where it is."));
+            OnPick(npc, "MING_ACCEPT", OnAcceptErrand);
+            AddChoice(ming, "Donna said you might know someone who can fix my RV.", 92,
+                () => Active && Stage == AskedDonna, null, offer);
+
+            var deliver = S1Container(npc, "rv_ming_deliver", b => b
+                .AddNode("ENTRY", "Good. Go see Marco at the body shop down by the docks. Tell him Mrs. Ming sent you."));
+            AddChoice(ming, "Here's your crate.", 91,
+                () => Active && Stage == MingCrate && (!_cratePlaced || PlayerHasItem(CrateId)), OnDeliverCrate, deliver);
+
+            // Loss fallback: collected the drop but no longer holding the crate -> admit it, pay the fee or defer.
+            var lost = S1Container(npc, "rv_ming_lost", b => b
+                .AddNode("ENTRY", MingAngry,
+                    c => c.Add("MING_PAY", "Pay $" + LostPackageFee, null)
+                          .Add("MING_DEFER_LOSS", "I'll get the money.", "MING_LOSS_DEFER"))
+                .AddNode("MING_LOSS_DEFER", MingShort));
+            OnPick(npc, "MING_PAY", OnMingPayLoss);
+            AddChoice(ming, "I lost your crate.", 90,
+                () => Active && Stage == MingCrate && _cratePlaced && !PlayerHasItem(CrateId), null, lost);
+            Core.LogDebug("[Questline] Ming dialogue injected.");
+        }
+
+        private static void InjectMarco(DialogueController marco, NPC npc)
+        {
+            // Greet / "fifty grand?" / referral / repair / sample carry a live price, a dynamic outcome, or are
+            // pure flavour -> worldspace replies. The favour + package hand-off are static -> in-dialogue nodes.
+            AddChoice(marco, "Can you fix my RV?", 100,
+                () => Active && Stage == Referred, OnMarcoGreet);
+            AddChoice(marco, "Fifty grand?", 99,
+                () => Active && Stage == MarcoMet, OnMarcoFifty);
+            // Dropping Mrs. Ming's name (only at MarcoMet - you've greeted him and she's referred you) applies
+            // the referral price (50k -> 10k) and advances to "pay".
+            AddChoice(marco, "Mrs. Ming sent me.", 98,
+                () => Active && Stage == MarcoMet, OnMarcoReferral);
+            _marcoRepairChoice = AddChoice(marco, RepairChoiceText(), 97,
+                () => Active && MarcoGreeted && Stage < Paid, OnMarcoRepair);
+
+            var favour = S1Container(npc, "rv_marco_favour", b => b
+                .AddNode("ENTRY", "Maybe. I left a package at a dead drop nearby. Pick it up, bring it back, and don't make it weird."));
+            AddChoice(marco, "Anything I can do to bring the price down?", 96,
+                () => Active && Stage == ReadyToPay && !_pickupActive, OnMarcoFavour, favour);
+
+            var gotpkg = S1Container(npc, "rv_marco_gotpkg", b => b
+                .AddNode("ENTRY", "Good. You can follow instructions. Bring me some of that good stuff now and then, and I'll keep shaving down the bill."));
+            AddChoice(marco, "Got your package.", 96,
+                () => Active && _pickupActive && _hasPackage && (!_pkgPlaced || PlayerHasItem(PackageId)), OnGotPackage, gotpkg);
+
+            // Loss fallback: collected the drop but no longer holding the package -> admit it, pay the fee or defer.
+            var lostpkg = S1Container(npc, "rv_marco_lost", b => b
+                .AddNode("ENTRY", MarcoAngry,
+                    c => c.Add("MARCO_PAY", "Pay $" + LostPackageFee, null)
+                          .Add("MARCO_DEFER_LOSS", "I'll get the money.", "MARCO_LOSS_DEFER"))
+                .AddNode("MARCO_LOSS_DEFER", MarcoShort));
+            OnPick(npc, "MARCO_PAY", OnMarcoPayLoss);
+            AddChoice(marco, "I lost your package.", 96,
+                () => Active && _pickupActive && _hasPackage && _pkgPlaced && !PlayerHasItem(PackageId), null, lostpkg);
+
+            // Sample option only appears while you're actually holding packaged product (and there's still room
+            // above the price floor). Trust must already be earned (Stage >= Trusted).
+            AddChoice(marco, "Give Marco a packaged sample", 95,
+                () => Active && Trusted_ && Stage < Paid && HoldingPackaged() && CurrentPrice() > RVRepairVanPreferences.RepairPrice, OnGiveSample);
+            Core.LogDebug("[Questline] Marco dialogue injected.");
+        }
+
+        // The game's own NPC registry, matched by id - the lookup S1API itself uses. Reliable where
+        // FindObjectsOfType<ConcreteNpc> is not (region streaming / concrete il2cpp subclasses).
+        private static NPC FindNpc(string id)
+        {
+            try
+            {
+                var reg = NPCManager.NPCRegistry;
+                if (reg == null) return null;
+                for (int i = 0; i < reg.Count; i++)
+                {
+                    NPC n = reg[i];
+                    if (n != null && string.Equals(n.ID, id, StringComparison.OrdinalIgnoreCase))
+                        return n;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        // Play an NPC's "hurt" voice line (his real VO) - used mid repair-cinematic so Marco grunts as if he hurt
+        // himself. Positional at the NPC, so the player (standing at Marco) hears it.
+        internal static void GruntNpc(NPC npc)
+        {
+            try { if (npc != null && npc.VoiceOverEmitter != null) npc.VoiceOverEmitter.Play(EVOLineType.Annoyed); }
+            catch (Exception e) { Core.Log.Warning("[Questline] grunt failed: " + e.Message); }
+        }
+
+#if DEBUG
+        // Debug: grunt the NPC nearest the player (so the cinematic debug toggle can demo the grunt anywhere).
+        internal static void DebugGruntNearest()
+        {
+            try
+            {
+                var reg = NPCManager.NPCRegistry;
+                if (reg == null) return;
+                Vector3 p = PlayerPos();
+                NPC best = null; float bd = float.MaxValue;
+                for (int i = 0; i < reg.Count; i++)
+                {
+                    NPC n = reg[i];
+                    if (n == null) continue;
+                    try { float d = Dist(p, n.transform.position); if (d < bd) { bd = d; best = n; } } catch { }
+                }
+                GruntNpc(best);
+            }
+            catch { }
+        }
+#endif
+
+        // --- S1API native dialogue (works since S1API 3.0.5 fixed the NPC-loader crash) -------------------
+
+        // Builds a real DialogueContainer on the NPC via S1API and hands it back (found again in the handler)
+        // so it can be attached to an injected choice's Conversation - the NPC's reply (and any sub-choices)
+        // then plays IN the dialogue UI, the conversation stays open. Null -> graceful fallback to a plain choice.
+        private static DialogueContainer S1Container(NPC npc, string name, Action<S1API.Entities.Dialogue.DialogueContainerBuilder> build)
+        {
+            try
+            {
+                if (npc == null) return null;
+                var s1 = S1API.Entities.NPC.Get(npc.ID);
+                if (s1 == null) return null;
+                s1.Dialogue.BuildAndRegisterContainer(name, build);
+                DialogueHandler h = npc.DialogueHandler;
+                var list = h != null ? h.dialogueContainers : null;
+                if (list != null)
+                    for (int i = 0; i < list.Count; i++)
+                        if (list[i] != null && ((UnityEngine.Object)list[i]).name == name) return list[i];
+            }
+            catch (Exception e) { Core.Log.Warning("[Questline] S1 container '" + name + "' failed: " + e.Message); }
+            return null;
+        }
+
+        private static void OnPick(NPC npc, string label, Action cb)
+        {
+            try
+            {
+                if (npc == null) return;
+                var s1 = S1API.Entities.NPC.Get(npc.ID);
+                s1?.Dialogue.OnChoiceSelected(label, cb);
+            }
+            catch (Exception e) { Core.Log.Warning("[Questline] OnPick '" + label + "' failed: " + e.Message); }
+        }
+
+        /// <summary>Debug dump: registry size, every NPC id, and the detail for our quest NPCs.</summary>
+        internal static void DumpNpcDiagnostics()
+        {
+            DumpState();
+            try
+            {
+                var reg = NPCManager.NPCRegistry;
+                if (reg == null) { Core.Log.Msg("[NPC-DIAG] NPCRegistry == null"); return; }
+                string ids = "";
+                for (int i = 0; i < reg.Count; i++)
+                {
+                    NPC n = reg[i];
+                    if (n == null) continue;
+                    try { ids += n.ID + " "; } catch { ids += "(err) "; }
+                }
+                Core.Log.Msg("[NPC-DIAG] registry(" + reg.Count + "): " + ids);
+                DiagTarget(DonnaId); DiagTarget(MingId); DiagTarget(MarcoId);
+            }
+            catch (Exception e) { Core.Log.Warning("[NPC-DIAG] dump failed: " + e.Message); }
+        }
+
+        /// <summary>Logs the exact runtime questline state - the evidence for "why doesn't it start / show".</summary>
+        internal static void DumpState()
+        {
+            try
+            {
+                Core.Log.Msg("[STATE] Enabled=" + RVRepairVanPreferences.Enabled
+                    + " Questline=" + RVRepairVanPreferences.QuestlineEnabled
+                    + " Stage=" + Stage + " Samples=" + Samples + " Discount=" + DiscountTotal
+                    + " Active(IsDestroyed)=" + Active + " ExplosionBeatPassed=" + ExplosionBeatPassed());
+                LogQuest("Getting Started");
+                LogQuest("Welcome to Hyland Point");
+                try { Core.Log.Msg("[STATE] S1API NPC.All count = " + S1API.Entities.NPC.All.Count); }
+                catch (Exception e) { Core.Log.Msg("[STATE] S1API NPC.All threw: " + e.Message); }
+            }
+            catch (Exception e) { Core.Log.Warning("[STATE] dump failed: " + e.Message); }
+        }
+
+        private static void LogQuest(string name)
+        {
+            try
+            {
+                var q = Il2CppScheduleOne.Quests.Quest.GetQuest(name);
+                Core.Log.Msg("[STATE] Quest '" + name + "': " + (q == null ? "NOT FOUND" : ("state=" + q.State)));
+            }
+            catch (Exception e) { Core.Log.Msg("[STATE] Quest '" + name + "' lookup threw: " + e.Message); }
+        }
+
+        private static void DiagTarget(string id)
+        {
+            NPC n = FindNpc(id);
+            if (n == null) { Core.Log.Msg("[NPC-DIAG] " + id + ": NOT in registry"); return; }
+            string go = "?"; bool active = false; bool ctrl = false;
+            try { var c = (Component)n; go = c.gameObject.name; active = c.gameObject.activeInHierarchy; } catch { }
+            try { ctrl = ControllerOf(n, out _) != null; } catch { }
+            Core.Log.Msg("[NPC-DIAG] " + id + ": IN registry, go='" + go + "' active=" + active + " controllerFound=" + ctrl);
+        }
+
+#if DEBUG
+        private static readonly System.Collections.Generic.HashSet<string> _diagged = new System.Collections.Generic.HashSet<string>();
+        private static void DiagOnce(string id, NPC n)
+        {
+            string key = id + "|" + (n == null ? "absent" : "noctrl");
+            if (!_diagged.Add(key)) return;
+            Core.Log.Msg("[NPC-DIAG] " + id + (n == null
+                ? ": not in registry yet"
+                : ": in registry but no DialogueController found"));
+        }
+#endif
+
+        private static void ResetDiag()
+        {
+#if DEBUG
+            _diagged.Clear();
+#endif
+        }
+
+        private static DialogueController ControllerOf(NPC npc, out Transform t)
+        {
+            t = null;
+            if (npc == null) return null;
+            try
+            {
+                t = ((Component)npc).transform;
+                DialogueHandler dh = npc.DialogueHandler;
+                DialogueController dc = null;
+                if (dh != null) dc = ((Component)dh).GetComponentInChildren<DialogueController>(true);
+                if (dc == null) dc = ((Component)npc).GetComponentInChildren<DialogueController>(true);
+                return dc;
+            }
+            catch { return null; }
+        }
+
+        // --- handlers -------------------------------------------------------
+
+        private static void OnAskDonna()
+        {
+            // reply = rv_donna node; advance.
+            Stage = AskedDonna;
+            SyncEntry();
+        }
+
+        // Fired by the in-dialogue "MING_ACCEPT" sub-choice (reply = MING_ACCEPTED node). No cash - the crate
+        // is already paid for. Marks a real dead drop near Ming as the pickup so there's always a marker.
+        private static void OnAcceptErrand()
+        {
+            if (Stage != AskedDonna) return;
+            Stage = MingErrand;
+            _crateDrop = ReserveDeadDrop(_mingT != null ? _mingT.position : RvPos());
+            _cratePoint = _crateDrop != null ? _crateDrop.Position
+                : (_mingT != null ? _mingT.position + new Vector3(8f, 0f, 8f) : RvPos());
+            _cratePlaced = PlaceItem(_crateDrop, CrateId);   // a real "Ming's Crate" to carry back
+            SyncEntry();
+        }
+
+        private static void OnDeliverCrate()
+        {
+            // reply = rv_ming_deliver node. Ming refers you to Marco (price still 50k until you say her name).
+            if (Stage != MingCrate) return;
+            if (_cratePlaced) RemovePlayerItem(CrateId);   // hand the crate over
+            Stage = Referred;
+            SyncEntry();
+        }
+
+        // Ming - you admitted losing her crate. Pay the fee to move on, or come back later.
+        private static void OnMingPayLoss()
+        {
+            if (Stage != MingCrate) return;
+            if (S1API.Money.Money.GetCashBalance() < LostPackageFee) { WorldSay(_mingT, MingShort); return; }
+            S1API.Money.Money.ChangeCashBalance(-LostPackageFee, true, true);
+            Stage = Referred;
+            WorldSay(_mingT, MingPaid);
+            SyncEntry();
+        }
+
+        private static void OnMarcoGreet()
+        {
+            // Always the full quote on first contact.
+            Stage = MarcoMet;
+            WorldSay(_marcoT, "Yeah, I can fix it. Fifty grand.");
+            SyncEntry();
+        }
+
+        private static void OnMarcoFifty()
+        {
+            // Pure flavour - no state change.
+            WorldSay(_marcoT, "You brought me a burnt-out shell. That's not a repair, that's a resurrection.");
+        }
+
+        private static void OnMarcoReferral()
+        {
+            if (Stage != MarcoMet) return;
+            Stage = ReadyToPay;          // ReferralUsed -> price drops 50k -> 10k
+            RefreshRepairChoice();
+            WorldSay(_marcoT, "Mrs. Ming sent you? Yeah, alright. Should've opened with that. Ten grand.");
+            SyncEntry();
+        }
+
+        private static void OnMarcoRepair()
+        {
+            try
+            {
+                if (!RVManager.IsDestroyed()) { WorldSay(_marcoT, "Your RV looks fine to me."); return; }
+                int price = CurrentPrice();
+                if (S1API.Money.Money.GetCashBalance() < price)
+                {
+                    WorldSay(_marcoT, "You're short. Come back when you've got the cash.");
+                    return;
+                }
+                // Commit payment synchronously (so an interrupted cinematic can never double-charge), then play
+                // the repair cinematic: fade to black -> repair sounds -> swap the RV while hidden -> fade back ->
+                // Marco's line.
+                S1API.Money.Money.ChangeCashBalance(-price, true, true);
+                int paid = price;
+                WorldSay(_marcoT, "Alright. Hold still, this won't take long.");
+                RVRepairVan.Effects.RepairCinematic.Play(
+                    () =>   // at the darkest point, with the swap hidden
+                    {
+                        if (RVManager.Repair())
+                        {
+                            RepairStateStore.SetRepaired(true);
+                            Stage = Paid;
+                            SyncEntry();   // objective -> Check on the RV
+                            Core.Log.Msg("[Questline] RV repaired for " + MoneyManager.FormatAmount(paid) + ".");
+                        }
+                    },
+                    () => WorldSay(_marcoT, "There she is - back from the dead. Go take a look, and try not to total her again."),
+                    () => GruntNpc(FindNpc(MarcoId)));   // mid-repair: Marco hurts himself
+            }
+            catch (Exception e) { Core.Log.Error("[Questline] repair failed: " + e); }
+        }
+
+        private static void OnMarcoFavour()
+        {
+            _pickupActive = true;
+            _hasPackage = false;
+            // Point the player at a REAL game dead drop near Marco (its own world marker). Reply = rv_marco_favour.
+            _drop = ReserveDeadDrop(_marcoT != null ? _marcoT.position : RvPos());
+            _dropPoint = _drop != null ? _drop.Position
+                : (_marcoT != null ? _marcoT.position + new Vector3(10f, 0f, 10f) : RvPos());
+            _pkgPlaced = PlaceItem(_drop, PackageId);   // a real "Marco's Package" to carry back
+            SyncEntry();
+        }
+
+        private static void OnGotPackage()
+        {
+            if (_pkgPlaced) RemovePlayerItem(PackageId);   // hand the package over
+            _pickupActive = false;
+            _hasPackage = false;
+            _drop = null;
+            Stage = Trusted;   // packaged samples unlocked. reply = rv_marco_gotpkg node.
+            SyncEntry();
+        }
+
+        // Marco - you admitted losing his package. Pay the fee to move on, or come back later.
+        private static void OnMarcoPayLoss()
+        {
+            if (!(_pickupActive && _hasPackage)) return;
+            if (S1API.Money.Money.GetCashBalance() < LostPackageFee) { WorldSay(_marcoT, MarcoShort); return; }
+            S1API.Money.Money.ChangeCashBalance(-LostPackageFee, true, true);
+            _pickupActive = false;
+            _hasPackage = false;
+            _drop = null;
+            Stage = Trusted;
+            WorldSay(_marcoT, MarcoPaid);
+            SyncEntry();
+        }
+
+        private static void OnGiveSample()
+        {
+            try
+            {
+                PlayerInventory inv = PlayerSingleton<PlayerInventory>.Instance;
+                ProductItemInstance product = inv?.EquippedItem?.TryCast<ProductItemInstance>();
+                if (product == null || product.AppliedPackaging == null)
+                {
+                    WorldSay(_marcoT, "That ain't packaged. Hand me something sealed.");
+                    return;
+                }
+                int discount = Mathf.Clamp(Mathf.RoundToInt(product.GetMonetaryValue()),
+                    RVRepairVanPreferences.MinSampleDiscount, RVRepairVanPreferences.MaxSampleDiscount);
+
+                // Marco TAKES it and consumes it (real consume animation + effects), like handing a free sample
+                // to a non-customer. We pass removeFromInventory:FALSE and remove exactly ONE unit ourselves:
+                // SendProduct's native removal quantity is unverifiable (body lives in GameAssembly.dll) and could
+                // wipe a whole stack >1. Removing one deterministically protects the player's stack either way.
+                NPC marco = FindNpc(MarcoId);
+                var cpb = (marco != null && marco.Behaviour != null) ? marco.Behaviour.ConsumeProductBehaviour : null;
+                int before = (inv != null && inv.equippedSlot != null) ? inv.equippedSlot.Quantity : -1;
+                if (cpb != null) cpb.SendProduct(product, false);   // consume/animate, but don't let it touch inventory
+                if (inv != null && inv.equippedSlot != null) RemoveOneFromSlot(inv.equippedSlot);   // exactly one (clears the slot if it was the last)
+                int after = (inv != null && inv.equippedSlot != null) ? inv.equippedSlot.Quantity : -1;
+                Core.LogDebug("[Questline] sample given: equipped qty " + before + " -> " + after + " (expected -1).");
+
+                Samples = Samples + 1;
+                DiscountTotal = DiscountTotal + discount;
+                RefreshRepairChoice();
+                WorldSay(_marcoT, "Appreciate it. Knocked " + MoneyManager.FormatAmount(discount) + " off the bill.");
+            }
+            catch (Exception e) { Core.Log.Warning("[Questline] give sample failed: " + e.Message); }
+        }
+
+        // Reserve a real (preferably empty) dead drop for a pickup step. Normally the FARTHEST drop from the
+        // origin (a proper errand); in DEBUG the CLOSEST (fast testing).
+        private static S1API.DeadDrops.DeadDropInstance ReserveDeadDrop(Vector3 origin)
+        {
+            try
+            {
+                var pool = S1API.DeadDrops.DeadDropManager.Empty;
+                if (pool == null || pool.Length == 0) pool = S1API.DeadDrops.DeadDropManager.All;
+                if (pool == null || pool.Length == 0) return null;
+
+                S1API.DeadDrops.DeadDropInstance pick = null;
+#if DEBUG
+                float best = float.MaxValue;   // closest
+#else
+                float best = -1f;              // farthest
+#endif
+                for (int i = 0; i < pool.Length; i++)
+                {
+                    var d = pool[i];
+                    if (d == null) continue;
+                    float dist = Vector3.Distance(origin, d.Position);
+#if DEBUG
+                    if (dist < best) { best = dist; pick = d; }
+#else
+                    if (dist > best) { best = dist; pick = d; }
+#endif
+                }
+                if (pick != null)
+                    Core.LogDebug("[Questline] dead drop: '" + pick.Name + "' at " + pick.Position + " (dist " + best.ToString("F0") + ")");
+                return pick;
+            }
+            catch (Exception e) { Core.Log.Warning("[Questline] reserve dead drop failed: " + e.Message); return null; }
+        }
+
+        // --- quest items (real carried packages placed in the dead drops) ---
+
+        private static void EnsureItems()
+        {
+            if (_itemsRegistered) return;
+            try
+            {
+                DumpItemsOnce();   // DEBUG only: list every item id/name (clone-base reference)
+                // Carry-only bases (a sack / a bag), NOT furniture - inherits a real icon + in-hand model.
+                // Tried in order; first that clones wins. grainbag/trashbag are StorableItemDefinition subclasses.
+                RegisterItem(CrateId, "Ming's Crate", "A sealed crate for Mrs. Ming. She said not to open it.",
+                    new[] { "grainbag", "trashbag", "flashlight" });
+                RegisterItem(PackageId, "Marco's Package", "A package Marco left at a drop. Don't make it weird.",
+                    new[] { "trashbag", "grainbag", "flashlight" });
+                _itemsRegistered = true;
+            }
+            catch (Exception e) { Core.Log.Warning("[Questline] item register failed: " + e.Message); }
+        }
+
+        // Register a quest item. We CLONE an existing storable item (inherits a real inventory icon + in-hand
+        // model + world mesh via CopyPropertiesFrom) and just override id/name/desc - a code-built item with no
+        // model shows a blank icon, nothing in-hand, and risks an NRE on equip. baseIds = candidate source items
+        // (carry-only), tried in order; CloneFrom throws if a base isn't a StorableItemDefinition, so we skip to
+        // the next. Fallback = a model-less item so registration never fails.
+        private static void RegisterItem(string id, string name, string desc, string[] baseIds)
+        {
+            if (S1API.Items.ItemManager.GetDefinition(id) != null) return;
+
+            S1API.Items.Storable.StorableItemDefinition def = null;
+            foreach (var baseId in baseIds)
+            {
+                try
+                {
+                    def = S1API.Items.Storable.ItemCreator.CloneFrom(baseId)
+                        .WithBasicInfo(id, name, desc, S1API.Items.ItemCategory.Tools)
+                        .WithStackLimit(1)
+                        .Build();   // Build() already registers (AddToRegistry) - no separate RegisterItem
+                    Core.LogDebug("[Questline] quest item '" + id + "' cloned from base '" + baseId + "'.");
+                    break;
+                }
+                catch (Exception e) { Core.LogDebug("[Questline] CloneFrom('" + baseId + "') failed: " + e.Message); }
+            }
+
+            if (def == null)
+            {
+                // No candidate base cloned - register a plain item (works, but blank icon / no in-hand model).
+                def = S1API.Items.Storable.ItemCreator.CreateItem(id, name, desc, S1API.Items.ItemCategory.Tools, 1);
+                Core.Log.Warning("[Questline] quest item '" + id + "' registered WITHOUT a model/icon (no clone base usable).");
+            }
+
+            try { S1API.Items.ItemManager.PreserveRuntimeItem(def); } catch { }
+        }
+
+        // One-time dump of every registered item (DEBUG builds only) - so we can read real ids/names from the
+        // log and confirm which clone base got picked. Compiles out entirely in Release.
+        private static bool _itemsDumped;
+        [System.Diagnostics.Conditional("DEBUG")]
+        private static void DumpItemsOnce()
+        {
+            if (_itemsDumped) return;
+            _itemsDumped = true;
+            try
+            {
+                var all = S1API.Items.ItemManager.GetAllItemDefinitions();
+                Core.Log.Msg("[ITEMDUMP] " + (all != null ? all.Count : 0) + " registered items:");
+                if (all != null)
+                    for (int i = 0; i < all.Count; i++)
+                    {
+                        var d = all[i];
+                        if (d == null) continue;
+                        try { Core.Log.Msg("[ITEMDUMP] id='" + d.ID + "' name='" + d.Name + "' cat=" + d.Category + " icon=" + (d.Icon != null)); }
+                        catch { }
+                    }
+            }
+            catch (Exception e) { Core.Log.Warning("[ITEMDUMP] failed: " + e.Message); }
+        }
+
+        // Place one unit of the item into the drop's storage. Returns true on success.
+        private static bool PlaceItem(S1API.DeadDrops.DeadDropInstance drop, string id)
+        {
+            try
+            {
+                if (drop == null) return false;
+                EnsureItems();
+                var def = S1API.Items.ItemManager.GetDefinition(id);
+                if (def == null) return false;
+                drop.Storage.AddItem(def.CreateInstance(1));
+                Core.LogDebug("[Questline] placed '" + id + "' in drop '" + drop.Name + "'.");
+                return true;
+            }
+            catch (Exception e) { Core.Log.Warning("[Questline] place item failed: " + e.Message); return false; }
+        }
+
+        // Does the player currently hold the item (any hotbar slot)?
+        private static bool PlayerHasItem(string id)
+        {
+            try
+            {
+                PlayerInventory inv = PlayerSingleton<PlayerInventory>.Instance;
+                var slots = inv != null ? inv.hotbarSlots : null;
+                if (slots == null) return false;
+                for (int i = 0; i < slots.Count; i++)
+                {
+                    ItemSlot slot = slots[i];
+                    ItemInstance item = slot != null ? slot.ItemInstance : null;
+                    if (item != null && string.Equals(((BaseItemInstance)item).ID, id, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private static void RemovePlayerItem(string id)
+        {
+            try
+            {
+                PlayerInventory inv = PlayerSingleton<PlayerInventory>.Instance;
+                var slots = inv != null ? inv.hotbarSlots : null;
+                if (slots == null) { Core.Log.Warning("[Questline] remove '" + id + "': no hotbar slots."); return; }
+                for (int i = 0; i < slots.Count; i++)
+                {
+                    ItemSlot slot = slots[i];
+                    ItemInstance item = slot != null ? slot.ItemInstance : null;
+                    if (item != null && string.Equals(((BaseItemInstance)item).ID, id, StringComparison.OrdinalIgnoreCase))
+                    {
+                        RemoveOneFromSlot(slot);
+                        Core.LogDebug("[Questline] removed one '" + id + "' from hotbar slot " + i + ".");
+                        return;
+                    }
+                }
+                Core.Log.Warning("[Questline] remove '" + id + "': not found in hotbar.");
+            }
+            catch (Exception e) { Core.Log.Warning("[Questline] remove item failed: " + e.Message); }
+        }
+
+        // Remove exactly one unit from a slot. ChangeQuantity(-1) on a quantity-1 item leaves an empty ghost
+        // slot (the item never disappears) - so for the last unit we must ClearStoredInstance to fully empty it.
+        private static void RemoveOneFromSlot(ItemSlot slot)
+        {
+            if (slot == null) return;
+            ItemInstance item = slot.ItemInstance;
+            int qty = item != null ? ((BaseItemInstance)item).Quantity : 0;
+            if (qty > 1) slot.ChangeQuantity(-1);
+            else slot.ClearStoredInstance(false);
+        }
+
+        // --- proximity (errand pickups + the closing "check on the RV") ------
+
+        private static IEnumerator ProximityCoroutine()
+        {
+            int myGen = _gen;
+            int waitedForLoad = 0;
+            while (myGen == _gen)
+            {
+                yield return new WaitForSeconds(1f);
+
+                // Wait for our save state to load before doing anything stateful, so we never read stale/default
+                // values right after a scene load (which could e.g. auto-start a quest the save already completed).
+                // Our state is now part of the game save (RepairSave), so it is always consistent with the actual
+                // RV/quest world - no desync reconciliation needed. Fallback: proceed after ~10s so a missing/late
+                // load never hangs the questline forever.
+                if (!RepairSave.Loaded)
+                {
+                    if (++waitedForLoad < 10) continue;
+                    if (waitedForLoad == 10) Core.Log.Warning("[Questline] save state not loaded after 10s - proceeding with current values.");
+                }
+
+                // Auto-start: an ACTUAL wrecked RV must exist (IsDestroyed) AND the story must be past the explosion
+                // beat ("Getting Started" active / "Welcome to Hyland Point" completed). Requiring IsDestroyed means
+                // an intact/repaired RV never spawns a flickering quest, while a fresh install on a post-explosion
+                // save (wrecked RV, our quest never played) still picks it up. Because the state is save-bound, a
+                // completed-but-not-saved run reloads with repaired=false/Stage=None here and correctly restarts.
+                if (RVRepairVanPreferences.Enabled && Stage == None && !RepairStateStore.GetRepaired()
+                    && RVManager.IsDestroyed() && ExplosionBeatPassed())
+                {
+                    Stage = Started;
+                    EnsureQuest();
+                    Core.Log.Msg("[Questline] quest started (wrecked RV + explosion beat passed).");
+                }
+
+                // Closing beat: after paying, the RV shell is restored (so Active is now false) - go look at it.
+                // Checked BEFORE the Active guard for exactly that reason.
+                if (Stage == Paid && RVManager.TryGetPosition(out Vector3 rvp) && Dist(PlayerPos(), rvp) < 14f)
+                {
+                    Stage = Done;
+                    RepairQuest.CompleteIfActive();
+                    WorldSay(_marcoT, "There she is. Standing again. Interior's your problem. Try not to piss off whoever torched it the first time.");
+                    Core.Log.Msg("[Questline] quest complete (RV checked).");
+                }
+
+                if (!Active) continue;
+                try
+                {
+                    Vector3 p = PlayerPos();
+
+                    // Ming's crate: collected once the player empties the marked drop (takes the real item).
+                    // Fallback to proximity when no item could be placed. Re-reserve + re-place after a reload.
+                    if (Stage == MingErrand)
+                    {
+                        if (_cratePoint == Vector3.zero)
+                        {
+                            _crateDrop = ReserveDeadDrop(_mingT != null ? _mingT.position : RvPos());
+                            _cratePoint = _crateDrop != null ? _crateDrop.Position
+                                : (_mingT != null ? _mingT.position + new Vector3(8f, 0f, 8f) : RvPos());
+                            _cratePlaced = PlaceItem(_crateDrop, CrateId);
+                            SyncEntry();
+                        }
+                        bool got = _cratePlaced ? (_crateDrop != null && _crateDrop.IsEmpty)
+                                                : (_cratePoint != Vector3.zero && Dist(p, _cratePoint) < 5f);
+                        if (got) { Stage = MingCrate; SyncEntry(); }
+                    }
+
+                    // Marco's package: collected once the player empties the drop (real item), else proximity.
+                    if (_pickupActive && !_hasPackage)
+                    {
+                        bool got = _pkgPlaced ? (_drop != null && _drop.IsEmpty)
+                                              : (Dist(p, _dropPoint) < 5f);
+                        if (got) { _hasPackage = true; SyncEntry(); }
+                    }
+                }
+                catch { /* never break the loop */ }
+            }
+        }
+
+        // --- quest journal entry --------------------------------------------
+
+        private static void EnsureQuest()
+        {
+            RepairQuest.StartIfNeeded();
+            SyncEntry();
+        }
+
+        private static void SyncEntry()
+        {
+            string title;
+            Vector3 poi;
+
+            if (_pickupActive)
+            {
+                title = _hasPackage ? "Bring Marco's package back" : "Pick up Marco's package from the dead drop";
+                poi = _hasPackage ? MarcoPos() : _dropPoint;
+            }
+            else
+            {
+                switch (Stage)
+                {
+                    case Started:    title = "Ask the motel manager about the RV"; poi = DonnaPos(); break;
+                    case AskedDonna: title = "Talk to Mrs. Ming at the Chinese restaurant"; poi = MingPos(); break;
+                    case MingErrand: title = "Pick up Ming's crate from the dead drop"; poi = _cratePoint; break;
+                    case MingCrate:  title = "Bring Ming's crate back to Mrs. Ming"; poi = MingPos(); break;
+                    case Referred:   title = "Talk to Marco at the body shop"; poi = MarcoPos(); break;
+                    case MarcoMet:   title = "Tell Marco Mrs. Ming sent you"; poi = MarcoPos(); break;
+                    case ReadyToPay:
+                    case Trusted:    title = "Pay Marco for the repair"; poi = MarcoPos(); break;
+                    case Paid:       title = "Check on the RV"; poi = RvPos(); break;
+                    default:         title = "Find a way to repair your RV"; poi = RvPos(); break;
+                }
+            }
+
+            RepairQuest.UpdateEntry(title, poi);
+        }
+
+        // --- helpers --------------------------------------------------------
+
+        // Adds a stage-conditional top-level choice (shouldShowCheck = the only way to gate visibility per
+        // quest stage). If a Conversation container is given, picking it plays that conversation IN the dialogue
+        // (NPC reply + any sub-choices, UI stays open). onChosen is the optional state action.
+        private static DialogueController.DialogueChoice AddChoice(DialogueController dc, string text, int prio, Func<bool> show, Action onChosen, DialogueContainer conv = null)
+        {
+            var choice = new DialogueController.DialogueChoice
+            {
+                Enabled = true,
+                ChoiceText = text,
+                Conversation = conv,
+                Priority = prio
+            };
+            Func<bool, bool> pred = (_) => { try { return show(); } catch { return false; } };
+            choice.shouldShowCheck = DelegateSupport.ConvertDelegate<DialogueController.DialogueChoice.ShouldShowCheck>(pred);
+            choice.onChoosen = new UnityEvent();
+            if (onChosen != null) choice.onChoosen.AddListener((Action)onChosen);
+            dc.AddDialogueChoice(choice, prio);
+            return choice;
+        }
+
+        /// <summary>True if the player is currently holding a PACKAGED product (peek only, no consume).</summary>
+        private static bool HoldingPackaged()
+        {
+            try
+            {
+                PlayerInventory inv = PlayerSingleton<PlayerInventory>.Instance;
+                ProductItemInstance p = inv?.EquippedItem?.TryCast<ProductItemInstance>();
+                return p != null && p.AppliedPackaging != null;
+            }
+            catch { return false; }
+        }
+
+        private static void RefreshRepairChoice()
+        {
+            try { if (_marcoRepairChoice != null) _marcoRepairChoice.ChoiceText = RepairChoiceText(); }
+            catch { }
+        }
+
+        internal static void RefreshPrice() => RefreshRepairChoice();
+
+        private static string RepairChoiceText() => "Repair my RV (" + MoneyManager.FormatAmount(CurrentPrice()) + ")";
+
+        private static void WorldSay(Transform npc, string line)
+        {
+            try
+            {
+                if (npc == null) return;
+                NPC n = npc.GetComponentInParent<NPC>();
+                if (n != null) n.SendWorldSpaceDialogue(line, 5f);
+            }
+            catch { /* worldspace lines are nice-to-have */ }
+        }
+
+        private static Vector3 PlayerPos()
+        {
+            try { var pl = Player.Local; if (pl != null) return pl.transform.position; } catch { }
+            return Vector3.zero;
+        }
+
+        private static float Dist(Vector3 a, Vector3 b) => Vector3.Distance(a, b);
+        private static Vector3 RvPos() { return RVManager.TryGetPosition(out Vector3 p) ? p : Vector3.zero; }
+        private static Vector3 DonnaPos() => _donnaT != null ? _donnaT.position : RvPos();
+        private static Vector3 MingPos() => _mingT != null ? _mingT.position : RvPos();
+        private static Vector3 MarcoPos() => _marcoT != null ? _marcoT.position : RvPos();
+    }
+}

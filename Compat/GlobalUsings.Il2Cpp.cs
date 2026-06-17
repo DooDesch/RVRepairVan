@@ -17,3 +17,7 @@ global using Il2CppScheduleOne.NPCs;
 global using Il2CppScheduleOne.NPCs.CharacterClasses;
 global using Il2CppScheduleOne.Persistence;
 global using Il2CppScheduleOne.DevUtilities;
+global using Il2CppScheduleOne.PlayerScripts;
+global using Il2CppScheduleOne.ItemFramework;
+global using Il2CppScheduleOne.Core.Items.Framework;   // BaseItemInstance (ID/Quantity/ChangeQuantity)
+global using Il2CppScheduleOne.Product;

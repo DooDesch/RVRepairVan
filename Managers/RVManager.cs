@@ -50,6 +50,58 @@ namespace RVRepairVan.Managers
             _cartelNote = null;
         }
 
+        /// <summary>Diagnostic: dump EVERY RV component (path + destroyed flags + children) so we can
+        /// see which RV is the wrecked one and where it lives.</summary>
+        [System.Diagnostics.Conditional("DEBUG")]
+        internal static void LogState()
+        {
+            try
+            {
+                var rvs = UnityEngine.Object.FindObjectsOfType<RV>(true);
+                int n = rvs == null ? 0 : rvs.Length;
+                Core.Log.Msg($"[RVManager] DIAG: FindObjectsOfType<RV>(true) -> {n} RV component(s)");
+                for (int i = 0; i < n; i++)
+                {
+                    RV rv = rvs[i];
+                    if (rv == null) continue;
+                    Transform t = ((Component)rv).transform;
+                    bool dest = false, exp = false;
+                    try { dest = rv.IsDestroyed; } catch { }
+                    try { exp = rv._exploded; } catch { }
+                    string children = "";
+                    for (int c = 0; c < t.childCount; c++)
+                    {
+                        Transform ch = t.GetChild(c);
+                        children += ch.name + "[" + (ch.gameObject.activeSelf ? "ON" : "off") + "] ";
+                    }
+                    Core.Log.Msg($"[RVManager] DIAG: RV#{i} path='{FullPath(t)}' activeInHierarchy={t.gameObject.activeInHierarchy} IsDestroyed={dest} _exploded={exp}");
+                    Core.Log.Msg($"[RVManager] DIAG: RV#{i} children -> {children}");
+                }
+
+                GameObject props = GameObject.Find("@Properties");
+                if (props != null)
+                {
+                    string kids = "";
+                    for (int i = 0; i < props.transform.childCount; i++)
+                    {
+                        Transform ch = props.transform.GetChild(i);
+                        kids += ch.name + "[" + (ch.gameObject.activeSelf ? "ON" : "off") + "] ";
+                    }
+                    Core.Log.Msg($"[RVManager] DIAG: @Properties children -> {kids}");
+                }
+            }
+            catch (Exception e) { Core.Log.Warning("[RVManager] DIAG failed: " + e.Message); }
+        }
+
+        private static string FullPath(Transform t)
+        {
+            string p = t.name;
+            Transform cur = t.parent;
+            int guard = 0;
+            while (cur != null && guard++ < 12) { p = cur.name + "/" + p; cur = cur.parent; }
+            return p;
+        }
+
         /// <summary>Find and cache the RV. Returns true once located. Never throws.</summary>
         internal static bool TryLocate()
         {
@@ -172,6 +224,7 @@ namespace RVRepairVan.Managers
             return true;
         }
 
+#if DEBUG
         /// <summary>
         /// Debug helper: wreck the RV so the repair flow can be tested without progressing
         /// to the story destruction event. Sets the destroyed state and swaps to the wreck visual.
@@ -208,5 +261,6 @@ namespace RVRepairVan.Managers
             Core.Log.Msg("[RVManager] RV wrecked (debug).");
             return true;
         }
+#endif
     }
 }

@@ -4,14 +4,14 @@ using S1API.Quests;
 namespace RVRepairVan.Quests
 {
     /// <summary>
-    /// Drives the "Repair the RV" quest lifecycle. Start is triggered by Ming
-    /// (quest-giver); completion is triggered when Marco finishes the repair.
-    /// S1API persists the active quest per save, so we look it up by name rather
+    /// Drives the "Back on the Road" quest lifecycle. Start is triggered by the explosion-beat
+    /// auto-start in Questline.ProximityCoroutine; completion is triggered by reaching the
+    /// repaired RV. S1API persists the active quest per save, so we look it up by name rather
     /// than holding a stale reference across reloads.
     /// </summary>
     internal static class RepairQuest
     {
-        internal const string Title = "Repair the RV";
+        internal const string Title = "Back on the Road";
 
         internal static bool IsActive()
         {
@@ -31,16 +31,35 @@ namespace RVRepairVan.Quests
             {
                 if (IsActive())
                 {
-                    Core.Log.Msg("[Quest] 'Repair the RV' already active.");
+                    Core.Log.Msg("[Quest] '" + Title + "' already active.");
                     return;
                 }
 
                 QuestManager.CreateQuest<RepairRVQuest>();
-                Core.Log.Msg("[Quest] 'Repair the RV' started.");
+                Core.Log.Msg("[Quest] '" + Title + "' started.");
             }
             catch (Exception e)
             {
                 Core.Log.Warning("[Quest] start failed: " + e.Message);
+            }
+        }
+
+        /// <summary>Retitle + re-point the (single) quest entry - used by the questline per stage.</summary>
+        internal static void UpdateEntry(string title, Vector3 poi)
+        {
+            try
+            {
+                Quest quest = QuestManager.GetQuestByName(Title);
+                if (quest?.QuestEntries != null && quest.QuestEntries.Count > 0)
+                {
+                    QuestEntry entry = quest.QuestEntries[0];
+                    entry.Title = title;
+                    entry.POIPosition = poi;
+                }
+            }
+            catch (Exception e)
+            {
+                Core.Log.Warning("[Quest] update entry failed: " + e.Message);
             }
         }
 
@@ -63,7 +82,7 @@ namespace RVRepairVan.Quests
                     }
                 }
 
-                Core.Log.Msg("[Quest] 'Repair the RV' completed.");
+                Core.Log.Msg("[Quest] '" + Title + "' completed.");
             }
             catch (Exception e)
             {

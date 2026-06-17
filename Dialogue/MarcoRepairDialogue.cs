@@ -10,7 +10,7 @@ using UnityEngine.Events;
 namespace RVRepairVan.Dialogue
 {
     /// <summary>
-    /// Injects an "Repair my RV" choice into the mechanic Marco's dialogue.
+    /// Injects a "Repair my RV (&lt;price&gt;)" choice into the mechanic Marco's dialogue.
     /// Marco (Il2CppScheduleOne.NPCs.CharacterClasses.Marco) is found at runtime;
     /// the choice is only shown while the RV is destroyed, and charges the player
     /// the configured price before repairing.
@@ -146,6 +146,16 @@ namespace RVRepairVan.Dialogue
             return "Repair my RV (" + MoneyManager.FormatAmount(RVRepairVanPreferences.RepairPrice) + ")";
         }
 
+        // Floating worldspace bubble at Marco (his completion line after the repair cinematic).
+        private static void WorldSay(NPC npc, string line)
+        {
+            try
+            {
+                if (npc != null) npc.SendWorldSpaceDialogue(line, 5f);
+            }
+            catch { /* worldspace lines are nice-to-have */ }
+        }
+
         private static void OnRepairChosen()
         {
             try
@@ -170,14 +180,23 @@ namespace RVRepairVan.Dialogue
                     return;
                 }
 
+                // Commit payment synchronously (so an interrupted cinematic can never double-charge), then play the
+                // repair cinematic - parity with the questline path (Quests/Questline.cs OnMarcoRepair).
                 S1API.Money.Money.ChangeCashBalance(-price, true, true);
-
-                if (RVManager.Repair())
-                {
-                    RepairStateStore.SetRepaired(true);
-                    RepairQuest.CompleteIfActive();
-                    Core.Log.Msg("[Marco] RV repaired for " + MoneyManager.FormatAmount(price) + ".");
-                }
+                float paid = price;
+                Marco marco = FindMarco();
+                RVRepairVan.Effects.RepairCinematic.Play(
+                    () =>   // at the darkest point, with the swap hidden
+                    {
+                        if (RVManager.Repair())
+                        {
+                            RepairStateStore.SetRepaired(true);
+                            RepairQuest.CompleteIfActive();
+                            Core.Log.Msg("[Marco] RV repaired for " + MoneyManager.FormatAmount(paid) + ".");
+                        }
+                    },
+                    () => WorldSay(marco, "There she is - back from the dead. Try not to total her again."),
+                    () => Questline.GruntNpc(marco));   // mid-repair: Marco hurts himself
             }
             catch (Exception e)
             {
