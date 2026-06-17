@@ -4,6 +4,15 @@ All notable changes to RVRepairVan are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 project adheres to Semantic Versioning.
 
+## [2.0.1] - 2026-06-17
+
+### Added
+- Marco now shows a persistent "What can I bring to lower the price?" reminder once you
+  have earned his trust (after the package favour). It explains that bringing packaged
+  product lowers the bill, so players who skipped the dialogue still know how to keep
+  progressing and afford the repair. It appears whenever you are not currently holding
+  product to hand over (when you are, the "give a sample" action is shown instead).
+
 ## [2.0.0] - 2026-06-17
 
 A ground-up rebuild on S1API with a full story questline, real items, save-bound

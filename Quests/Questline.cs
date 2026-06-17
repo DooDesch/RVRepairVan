@@ -253,6 +253,14 @@ namespace RVRepairVan.Quests
             // above the price floor). Trust must already be earned (Stage >= Trusted).
             AddChoice(marco, "Give Marco a packaged sample", 95,
                 () => Active && Trusted_ && Stage < Paid && HoldingPackaged() && CurrentPrice() > RVRepairVanPreferences.RepairPrice, OnGiveSample);
+
+            // Persistent reminder once trust is earned: tells players (who may have skipped the dialogue) HOW to
+            // keep lowering the price. Shows whenever they're NOT currently holding product to hand over (when they
+            // are, the "Give Marco a packaged sample" action is visible instead), until paid or the floor is hit.
+            var bringInfo = S1Container(npc, "rv_marco_bring", b => b
+                .AddNode("ENTRY", "Bring me packaged product - sealed stuff, not raw. Every piece I take knocks its value off the bill, up to five hundred a pop, right down to my floor."));
+            AddChoice(marco, "What can I bring to lower the price?", 94,
+                () => Active && Trusted_ && Stage < Paid && !HoldingPackaged() && CurrentPrice() > RVRepairVanPreferences.RepairPrice, null, bringInfo);
             Core.LogDebug("[Questline] Marco dialogue injected.");
         }
 

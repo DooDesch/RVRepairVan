@@ -93,6 +93,7 @@ Player choice | shown when (`Active &&` ...) | reply | effect. "node" = in-dialo
 | "I lost your package." | `_pickupActive && _hasPackage && _pkgPlaced && !holding rv_marco_package` | node `rv_marco_lost` (ENTRY=`MarcoAngry`): sub-choices `MARCO_PAY` "Pay $500" -> (no node); `MARCO_DEFER_LOSS` "I'll get the money." -> node `MARCO_LOSS_DEFER` (`MarcoShort`) | `MARCO_PAY` -> `OnMarcoPayLoss` |
 | (sub) `MARCO_PAY` | in `rv_marco_lost` | - | `OnMarcoPayLoss`: cash<500 -> worldspace `MarcoShort`; else charge $500, `_pickupActive=false`, `Stage=Trusted`, worldspace `MarcoPaid` |
 | "Give Marco a packaged sample" | `Trusted_ && Stage<Paid && HoldingPackaged() && CurrentPrice()>floor` | worldspace (dynamic) | `OnGiveSample` (below) |
+| "What can I bring to lower the price?" | `Trusted_ && Stage<Paid && !HoldingPackaged() && CurrentPrice()>floor` | node `rv_marco_bring`: *"Bring me packaged product - sealed stuff, not raw. Every piece I take knocks its value off the bill, up to five hundred a pop, right down to my floor."* | (info reminder, none) |
 
 **`OnMarcoRepair`:** cash < price -> *"You're short. Come back when you've got the cash."* | else: charge `price`
 synchronously, then **play the repair cinematic** (`Effects/RepairCinematic.Play`): fade to black (game
