@@ -172,11 +172,15 @@ jobs:
         with:
           token: ${{ secrets.THUNDERSTORE_TOKEN }}
           community: schedule-i
+          repo: thunderstore.io
           namespace: DooDesch
           name: RVRepairVan
           description: Repair your wrecked RV in Schedule I - get the job from Mrs. Ming, pay Marco the mechanic, all guided by a tracked quest with a repair cinematic.
           version: ${{ needs.build.outputs.version }}
           path: thunderstore-package
+          deps: |
+            LavaGang-MelonLoader-0.7.3
+            ifBars-S1API_Forked-3.0.5
           categories: |
             Mods
 
