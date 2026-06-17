@@ -5,6 +5,7 @@ using Il2CppScheduleOne.VoiceOver;   // EVOLineType / VOEmitter (Marco's grunt)
 using MelonLoader;
 using RVRepairVan.Config;
 using RVRepairVan.Managers;
+using RVRepairVan.Net;
 using RVRepairVan.Persistence;
 using S1API.Quests;
 using UnityEngine.Events;
@@ -18,7 +19,7 @@ namespace RVRepairVan.Quests
     /// samples) -> pay -> check the RV. A single stage value drives the objective AND the price tier
     /// (ReferralUsed / Trusted are derived from Stage). Progress persists per save via RepairStateStore.
     /// </summary>
-    internal static class Questline
+    internal static partial class Questline
     {
         // Persisted stages (RepairStateStore.GetStage/SetStage). The stage encodes ALL progression, so the
         // price tier is derived from it: the 10k referral price (ReferralUsed) at >= ReadyToPay, the sample
@@ -51,14 +52,37 @@ namespace RVRepairVan.Quests
         private static S1API.DeadDrops.DeadDropInstance _crateDrop;  // reserved dead drop for Ming's crate
         private static bool _cratePlaced, _pkgPlaced;   // a real item was placed in that drop (else proximity fallback)
         private static bool _itemsRegistered;
+        private static bool _clientCheckedRv;    // co-op client: reported reaching the post-repair RV once
         private static int _gen;                 // scene generation - stops stale coroutines after a reload
 
         private static Transform _donnaT, _mingT, _marcoT;
         private static DialogueController.DialogueChoice _marcoRepairChoice;
 
-        private static int Stage { get => RepairStateStore.GetStage(); set => RepairStateStore.SetStage(value); }
+        // The host is authoritative: any host-side write to Stage / DiscountTotal auto-replicates to all clients
+        // (single StageSync broadcast). Offline and client writes don't broadcast (client writes only happen via
+        // ApplyStageSync, which uses RepairStateStore directly to avoid echoing). This is the one choke point that
+        // keeps every shared state change in sync without per-handler broadcast calls.
+        private static int Stage
+        {
+            get => RepairStateStore.GetStage();
+            set
+            {
+                RepairStateStore.SetStage(value);
+                if (NetworkBus.Online && NetworkBus.IsServer)
+                    NetworkBus.BroadcastToAll(RvOp.StageSync, value, DiscountTotal);
+            }
+        }
         private static int Samples { get => RepairStateStore.GetSamples(); set => RepairStateStore.SetSamples(value); }
-        private static int DiscountTotal { get => RepairStateStore.GetDiscountTotal(); set => RepairStateStore.SetDiscountTotal(value); }
+        private static int DiscountTotal
+        {
+            get => RepairStateStore.GetDiscountTotal();
+            set
+            {
+                RepairStateStore.SetDiscountTotal(value);
+                if (NetworkBus.Online && NetworkBus.IsServer)
+                    NetworkBus.BroadcastToAll(RvOp.StageSync, Stage, value);
+            }
+        }
 
         private static bool MarcoGreeted => Stage >= MarcoMet;   // asked Marco "can you fix it"
         private static bool ReferralUsed => Stage >= ReadyToPay;  // you actually told Marco - price is 10k
@@ -100,6 +124,7 @@ namespace RVRepairVan.Quests
             _donnaDone = _mingDone = _marcoDone = false;
             _pickupActive = false;
             _hasPackage = false;
+            _clientCheckedRv = false;
             _drop = null;
             _crateDrop = null;
             _cratePlaced = _pkgPlaced = false;   // _itemsRegistered stays - registration persists across resets
@@ -111,15 +136,20 @@ namespace RVRepairVan.Quests
 
         internal static void Start()
         {
+            InitNet();
             MelonCoroutines.Start(SetupCoroutine());
             MelonCoroutines.Start(ProximityCoroutine());
             MelonCoroutines.Start(RestoreCoroutine());
+            MelonCoroutines.Start(NetJoinCoroutine());
         }
 
         /// <summary>After a save loads, re-create + re-sync the journal quest at the stored stage.</summary>
         private static IEnumerator RestoreCoroutine()
         {
             yield return new WaitForSeconds(4f);
+            // On a co-op CLIENT the local save is not authoritative - the host's snapshot (RequestSnapshot ->
+            // StageSync/RepairApplied) drives our journal instead, so don't restore from stale local state.
+            if (NetworkBus.Online && !NetworkBus.IsServer) yield break;
             try { if (Active && Stage >= Started && Stage < Done) EnsureQuest(); }
             catch (Exception e) { Core.Log.Warning("[Questline] restore failed: " + e.Message); }
         }
@@ -444,6 +474,8 @@ namespace RVRepairVan.Quests
 
         private static void OnAskDonna()
         {
+            if (RouteIntent(RvOp.AskDonna)) return;   // co-op client: let the host advance + replicate
+            if (Stage != Started) return;             // host re-validates (rejects stale/out-of-order intents)
             // reply = rv_donna node; advance.
             Stage = AskedDonna;
             SyncEntry();
@@ -453,6 +485,7 @@ namespace RVRepairVan.Quests
         // is already paid for. Marks a real dead drop near Ming as the pickup so there's always a marker.
         private static void OnAcceptErrand()
         {
+            if (RouteIntent(RvOp.AcceptErrand)) return;   // co-op client: host reserves the drop + places the crate
             if (Stage != AskedDonna) return;
             Stage = MingErrand;
             _crateDrop = ReserveDeadDrop(_mingT != null ? _mingT.position : RvPos());
@@ -464,9 +497,19 @@ namespace RVRepairVan.Quests
 
         private static void OnDeliverCrate()
         {
+            // The crate leaves the ACTING player's own inventory (PlayerInventory is per-player) - do that locally
+            // on whoever picked the choice, then ask the host to advance the shared stage.
+            if (_cratePlaced) RemovePlayerItem(CrateId);   // hand the crate over (acting player's hotbar)
+            if (RouteIntent(RvOp.DeliverCrate)) return;
+            HostDeliverCrate();   // host or offline
+        }
+
+        // Host-only (or offline) shared-state advance for the crate delivery - no inventory touch, so it is safe to
+        // run when the host is merely processing a client's intent (the client already removed its own crate).
+        private static void HostDeliverCrate()
+        {
             // reply = rv_ming_deliver node. Ming refers you to Marco (price still 50k until you say her name).
             if (Stage != MingCrate) return;
-            if (_cratePlaced) RemovePlayerItem(CrateId);   // hand the crate over
             Stage = Referred;
             SyncEntry();
         }
@@ -474,6 +517,7 @@ namespace RVRepairVan.Quests
         // Ming - you admitted losing her crate. Pay the fee to move on, or come back later.
         private static void OnMingPayLoss()
         {
+            if (RouteIntent(RvOp.MingPayLoss)) return;   // host charges the shared pool + advances
             if (Stage != MingCrate) return;
             if (S1API.Money.Money.GetCashBalance() < LostPackageFee) { WorldSay(_mingT, MingShort); return; }
             S1API.Money.Money.ChangeCashBalance(-LostPackageFee, true, true);
@@ -484,6 +528,8 @@ namespace RVRepairVan.Quests
 
         private static void OnMarcoGreet()
         {
+            if (RouteIntent(RvOp.MarcoGreet)) return;
+            if (Stage != Referred) return;
             // Always the full quote on first contact.
             Stage = MarcoMet;
             WorldSay(_marcoT, "Yeah, I can fix it. Fifty grand.");
@@ -498,6 +544,7 @@ namespace RVRepairVan.Quests
 
         private static void OnMarcoReferral()
         {
+            if (RouteIntent(RvOp.MarcoReferral)) return;
             if (Stage != MarcoMet) return;
             Stage = ReadyToPay;          // ReferralUsed -> price drops 50k -> 10k
             RefreshRepairChoice();
@@ -516,12 +563,28 @@ namespace RVRepairVan.Quests
                     WorldSay(_marcoT, "You're short. Come back when you've got the cash.");
                     return;
                 }
-                // Commit payment synchronously (so an interrupted cinematic can never double-charge), then play
-                // the repair cinematic: fade to black -> repair sounds -> swap the RV while hidden -> fade back ->
-                // Marco's line.
+                WorldSay(_marcoT, "Alright. Hold still, this won't take long.");
+
+                // Co-op CLIENT: the repair (RV state + the money charge + persistence) must run on the HOST, since
+                // RV.IsDestroyed and the money balance are host-authoritative. Send the intent, play the cinematic
+                // locally for feedback, and let the host's RepairApplied broadcast swap the RV during the black.
+                if (NetworkBus.Online && !NetworkBus.IsServer)
+                {
+                    NetworkBus.SendToHost(RvOp.PayRepair);
+                    RVRepairVan.Effects.RepairCinematic.Play(
+                        null,   // no local field write - the host drives the visual via RepairApplied
+                        () => WorldSay(_marcoT, "There she is - back from the dead. Go take a look, and try not to total her again."),
+                        () => GruntNpc(FindNpc(MarcoId)));
+                    return;
+                }
+
+                // Co-op HOST: authoritative repair WITH the cinematic (the host player is the one acting).
+                if (NetworkBus.IsServer) { HostPayRepair(true); return; }
+
+                // Offline single-player: unchanged. Commit payment synchronously (so an interrupted cinematic can
+                // never double-charge), then play the repair cinematic and swap the RV while hidden.
                 S1API.Money.Money.ChangeCashBalance(-price, true, true);
                 int paid = price;
-                WorldSay(_marcoT, "Alright. Hold still, this won't take long.");
                 RVRepairVan.Effects.RepairCinematic.Play(
                     () =>   // at the darkest point, with the swap hidden
                     {
@@ -541,6 +604,8 @@ namespace RVRepairVan.Quests
 
         private static void OnMarcoFavour()
         {
+            if (RouteIntent(RvOp.MarcoFavour)) return;   // host reserves the drop + places the package
+            if (Stage != ReadyToPay || _pickupActive) return;
             _pickupActive = true;
             _hasPackage = false;
             // Point the player at a REAL game dead drop near Marco (its own world marker). Reply = rv_marco_favour.
@@ -553,7 +618,15 @@ namespace RVRepairVan.Quests
 
         private static void OnGotPackage()
         {
-            if (_pkgPlaced) RemovePlayerItem(PackageId);   // hand the package over
+            // Package leaves the ACTING player's own inventory locally, then the host advances the shared stage.
+            if (_pkgPlaced) RemovePlayerItem(PackageId);   // hand the package over (acting player's hotbar)
+            if (RouteIntent(RvOp.GotPackage)) return;
+            HostGotPackage();   // host or offline
+        }
+
+        private static void HostGotPackage()
+        {
+            if (!(_pickupActive && _hasPackage)) return;
             _pickupActive = false;
             _hasPackage = false;
             _drop = null;
@@ -564,6 +637,7 @@ namespace RVRepairVan.Quests
         // Marco - you admitted losing his package. Pay the fee to move on, or come back later.
         private static void OnMarcoPayLoss()
         {
+            if (RouteIntent(RvOp.MarcoPayLoss)) return;   // host charges the shared pool + advances
             if (!(_pickupActive && _hasPackage)) return;
             if (S1API.Money.Money.GetCashBalance() < LostPackageFee) { WorldSay(_marcoT, MarcoShort); return; }
             S1API.Money.Money.ChangeCashBalance(-LostPackageFee, true, true);
@@ -601,12 +675,27 @@ namespace RVRepairVan.Quests
                 int after = (inv != null && inv.equippedSlot != null) ? inv.equippedSlot.Quantity : -1;
                 Core.LogDebug("[Questline] sample given: equipped qty " + before + " -> " + after + " (expected -1).");
 
-                Samples = Samples + 1;
-                DiscountTotal = DiscountTotal + discount;
-                RefreshRepairChoice();
-                WorldSay(_marcoT, "Appreciate it. Knocked " + MoneyManager.FormatAmount(discount) + " off the bill.");
+                // The consume above is the ACTING player's local action (per-player inventory; SendProduct is a
+                // ServerRpc so Marco's eating replicates). The DISCOUNT is shared state - the host owns it. Client:
+                // send the discount it computed and let the host apply + replicate the new price.
+                if (RouteIntent(RvOp.GiveSample, discount))
+                {
+                    WorldSay(_marcoT, "Appreciate it. Knocked " + MoneyManager.FormatAmount(discount) + " off the bill.");
+                    return;
+                }
+                HostGiveSample(discount);   // host or offline
             }
             catch (Exception e) { Core.Log.Warning("[Questline] give sample failed: " + e.Message); }
+        }
+
+        // Host-only (or offline): apply a sample's discount to the shared price. Safe when the host is processing a
+        // client's GiveSample intent (the client already consumed its own product) - no inventory touch here.
+        private static void HostGiveSample(int discount)
+        {
+            Samples = Samples + 1;
+            DiscountTotal = DiscountTotal + discount;   // setter broadcasts the new price (StageSync) to all clients
+            RefreshRepairChoice();
+            WorldSay(_marcoT, "Appreciate it. Knocked " + MoneyManager.FormatAmount(discount) + " off the bill.");
         }
 
         // Reserve a real (preferably empty) dead drop for a pickup step. Normally the FARTHEST drop from the
@@ -811,6 +900,22 @@ namespace RVRepairVan.Quests
                     if (waitedForLoad == 10) Core.Log.Warning("[Questline] save state not loaded after 10s - proceeding with current values.");
                 }
 
+                // Co-op CLIENT: the HOST owns all stage advancement (auto-start, dead-drop pickups, the closing
+                // beat) and replicates it via StageSync/TransientSync. A client only renders - it must never write
+                // Stage/transient here, or it would fight the host's authoritative state. The ONE exception is the
+                // post-repair "check on the RV" beat: the client REPORTS reaching it (once) so either player can
+                // finish the quest, and the host validates + completes for everyone. Offline + host run it all.
+                if (NetworkBus.Online && !NetworkBus.IsServer)
+                {
+                    if (Stage == Paid && !_clientCheckedRv
+                        && RVManager.TryGetPosition(out Vector3 crvp) && Dist(PlayerPos(), crvp) < 14f)
+                    {
+                        _clientCheckedRv = true;
+                        NetworkBus.SendToHost(RvOp.CheckedRv);
+                    }
+                    continue;
+                }
+
                 // Auto-start: an ACTUAL wrecked RV must exist (IsDestroyed) AND the story must be past the explosion
                 // beat ("Getting Started" active / "Welcome to Hyland Point" completed). Requiring IsDestroyed means
                 // an intact/repaired RV never spawns a flickering quest, while a fresh install on a post-explosion
@@ -825,13 +930,10 @@ namespace RVRepairVan.Quests
                 }
 
                 // Closing beat: after paying, the RV shell is restored (so Active is now false) - go look at it.
-                // Checked BEFORE the Active guard for exactly that reason.
+                // Checked BEFORE the Active guard for exactly that reason. Also fired by a client's CheckedRv intent.
                 if (Stage == Paid && RVManager.TryGetPosition(out Vector3 rvp) && Dist(PlayerPos(), rvp) < 14f)
                 {
-                    Stage = Done;
-                    RepairQuest.CompleteIfActive();
-                    WorldSay(_marcoT, "There she is. Standing again. Interior's your problem. Try not to piss off whoever torched it the first time.");
-                    Core.Log.Msg("[Questline] quest complete (RV checked).");
+                    HostCheckedRv();
                 }
 
                 if (!Active) continue;
@@ -904,6 +1006,10 @@ namespace RVRepairVan.Quests
             }
 
             RepairQuest.UpdateEntry(title, poi);
+
+            // Host: re-broadcast the transient pickup/drop state on every entry change so clients render the same
+            // objective text + dead-drop marker (clients reuse this exact SyncEntry, driven by the synced flags).
+            if (NetworkBus.Online && NetworkBus.IsServer) HostBroadcastTransient();
         }
 
         // --- helpers --------------------------------------------------------

@@ -33,6 +33,7 @@ namespace RVRepairVan
 
             RVRepairVanPreferences.Initialize();
             HarmonyInstance.PatchAll();
+            RVRepairVan.Net.NetworkBus.Init(HarmonyInstance);   // co-op sync (host-authoritative; no-op offline)
 
             Log.Msg($"RVRepairVan initialized. Enabled={RVRepairVanPreferences.Enabled}, Questline={RVRepairVanPreferences.QuestlineEnabled}, RepairPrice={RVRepairVanPreferences.RepairPrice}");
         }
@@ -50,6 +51,10 @@ namespace RVRepairVan
 
             RVManager.Reset();
             RVRepairVan.Effects.RepairCinematic.ForceReset();   // un-black + unlock input if a prior cinematic was interrupted
+
+            // Wire the co-op bus dispatch regardless of quest mode - Simple mode also needs the host-authoritative
+            // PayRepair round-trip (idempotent; no-op offline).
+            Questline.InitNet();
 
             if (RVRepairVanPreferences.QuestlineEnabled)
             {
@@ -111,6 +116,13 @@ namespace RVRepairVan
                     RVRepairVan.Effects.RepairCinematic.Play(null, () => Log.Msg("[Debug] cinematic test done."),
                         () => Questline.DebugGruntNearest());
                 }
+
+                if (RVRepairVanPreferences.ConsumeNetPingRequest())
+                {
+                    Log.Msg("[Debug] Net ping. Online=" + RVRepairVan.Net.NetworkBus.Online + " IsServer=" + RVRepairVan.Net.NetworkBus.IsServer);
+                    if (RVRepairVan.Net.NetworkBus.IsServer) RVRepairVan.Net.NetworkBus.BroadcastToAll(RVRepairVan.Net.RvOp.Ping, 42);
+                    RVRepairVan.Net.NetworkBus.SendToHost(RVRepairVan.Net.RvOp.Ping, 99);
+                }
 #endif
             }
             catch (Exception e)
@@ -130,6 +142,16 @@ namespace RVRepairVan
             float waited = 0f;
             while (!RepairSave.Loaded && waited < 10f) { yield return new WaitForSeconds(0.5f); waited += 0.5f; }
             yield return new WaitForSeconds(2f);
+
+            // On a co-op CLIENT the local save is not authoritative for the RV - the host owns RV.IsDestroyed and
+            // replays it via OnSpawnServer / our RepairApplied snapshot. Restoring from our own (possibly stale)
+            // local flag here could fight the host, so skip it; the host and offline both still restore normally.
+            if (RVRepairVan.Net.NetworkBus.Online && !RVRepairVan.Net.NetworkBus.IsServer)
+            {
+                Log.Msg("[Restore] co-op client - deferring RV state to the host (no local restore).");
+                yield break;
+            }
+
             RVManager.LogState();   // diagnostic: see the real RV state on load
 
             bool restore = false;

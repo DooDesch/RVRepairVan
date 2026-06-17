@@ -3,6 +3,7 @@ using System.Collections;
 using Il2CppInterop.Runtime;
 using RVRepairVan.Config;
 using RVRepairVan.Managers;
+using RVRepairVan.Net;
 using RVRepairVan.Persistence;
 using RVRepairVan.Quests;
 using UnityEngine.Events;
@@ -180,11 +181,27 @@ namespace RVRepairVan.Dialogue
                     return;
                 }
 
-                // Commit payment synchronously (so an interrupted cinematic can never double-charge), then play the
-                // repair cinematic - parity with the questline path (Quests/Questline.cs OnMarcoRepair).
+                Marco marco = FindMarco();
+
+                // Co-op CLIENT: the repair (RV state + money charge + persistence) is host-authoritative - send the
+                // intent and play the cinematic locally; the host's RepairApplied swaps the RV during the black.
+                if (NetworkBus.Online && !NetworkBus.IsServer)
+                {
+                    NetworkBus.SendToHost(RvOp.PayRepair);
+                    RVRepairVan.Effects.RepairCinematic.Play(
+                        null,
+                        () => WorldSay(marco, "There she is - back from the dead. Try not to total her again."),
+                        () => Questline.GruntNpc(marco));
+                    return;
+                }
+
+                // Co-op HOST: authoritative repair WITH the cinematic (the host player is acting).
+                if (NetworkBus.IsServer) { Questline.HostPayRepair(true); return; }
+
+                // Offline single-player: unchanged. Commit payment synchronously (so an interrupted cinematic can
+                // never double-charge), then play the repair cinematic - parity with the questline path.
                 S1API.Money.Money.ChangeCashBalance(-price, true, true);
                 float paid = price;
-                Marco marco = FindMarco();
                 RVRepairVan.Effects.RepairCinematic.Play(
                     () =>   // at the darkest point, with the swap hidden
                     {

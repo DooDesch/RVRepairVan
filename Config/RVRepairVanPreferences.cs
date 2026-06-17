@@ -25,6 +25,7 @@ namespace RVRepairVan.Config
         private static MelonPreferences_Entry<bool> _addCashDebug;
         private static MelonPreferences_Entry<bool> _dumpStateDebug;
         private static MelonPreferences_Entry<bool> _testCinematicDebug;
+        private static MelonPreferences_Entry<bool> _netPingDebug;
 #endif
 
         internal static void Initialize()
@@ -56,6 +57,8 @@ namespace RVRepairVan.Config
                 "Toggle ON (ideally while standing at the RV) to log the current RV state to the MelonLoader console. Auto-resets.");
             _testCinematicDebug = CreateEntry("TestRepairCinematicDebug", false, "Play repair cinematic (debug, one-shot)",
                 "Toggle ON to play the repair fade-to-black + sound right where you stand, without going to Marco. Auto-resets.");
+            _netPingDebug = CreateEntry("TestNetPingDebug", false, "Net ping (debug, one-shot)",
+                "Toggle ON in a co-op session to send a network ping (host->clients + client->host). Watch the log for '[Net] host <- Ping' / '[Net] client <- Ping' on the other machine. Auto-resets.");
 #endif
         }
 
@@ -120,6 +123,17 @@ namespace RVRepairVan.Config
             if (_testCinematicDebug != null && _testCinematicDebug.Value)
             {
                 _testCinematicDebug.Value = false;
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>One-shot: true once if the debug "Net ping" toggle is on, then resets it.</summary>
+        internal static bool ConsumeNetPingRequest()
+        {
+            if (_netPingDebug != null && _netPingDebug.Value)
+            {
+                _netPingDebug.Value = false;
                 return true;
             }
             return false;

@@ -172,8 +172,11 @@ namespace RVRepairVan.Managers
         }
 
         /// <summary>
-        /// Repair the RV: clear the destroyed/exploded state and swap wreck visuals
-        /// back to the intact model. Does NOT charge the player (caller handles payment).
+        /// Authoritative repair: clear the destroyed/exploded state AND swap visuals.
+        /// Writing IsDestroyed is what makes the repair PERSIST (RV.ShouldSave/GetSaveString)
+        /// and be correct for late joiners (OnSpawnServer pushes it) - so in co-op this must
+        /// run on the HOST only (the host owns the RV instance + the save). Offline it runs
+        /// locally exactly as before. Does NOT charge the player (caller handles payment).
         /// </summary>
         internal static bool Repair()
         {
@@ -188,6 +191,23 @@ namespace RVRepairVan.Managers
             catch (Exception e) { Core.Log.Warning("[RVManager] set IsDestroyed failed: " + e.Message); }
             try { _rv._exploded = false; }
             catch { /* field may not exist on every build */ }
+
+            return RepairVisualOnly();
+        }
+
+        /// <summary>
+        /// Visual-only repair: swap the wreck model back to the intact model + re-enable FX,
+        /// WITHOUT touching IsDestroyed/_exploded. Safe to run on any client (a client writing
+        /// IsDestroyed neither replicates nor persists, so non-host clients only do the visual).
+        /// Idempotent - re-running on an already-intact RV is a no-op.
+        /// </summary>
+        internal static bool RepairVisualOnly()
+        {
+            if (!TryLocate())
+            {
+                Core.Log.Warning("[RVManager] RV not found - cannot repair (visual).");
+                return false;
+            }
 
             // Visual swap: intact model on, wreck + note off.
             try
@@ -220,7 +240,7 @@ namespace RVRepairVan.Managers
             }
             catch { /* FXContainer optional */ }
 
-            Core.Log.Msg("[RVManager] RV repaired.");
+            Core.Log.Msg("[RVManager] RV repaired (visual).");
             return true;
         }
 
