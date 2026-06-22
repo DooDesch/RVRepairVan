@@ -28,7 +28,7 @@ namespace RVRepairVan.Net
         StageSync = 100,      // A = stage, B = discount total
         RepairApplied = 101,
         TransientSync = 102,  // A = flags (1=pickupActive, 2=hasPackage), B = active dead-drop index (-1 = none)
-        Ping = 200,   // Phase 0 spike only
+        Ping = 200,   // connectivity / latency ping
     }
 
     /// <summary>A decoded bus message. Carried as the guid string "RVRV:&lt;op&gt;:&lt;a&gt;:&lt;b&gt;".</summary>
