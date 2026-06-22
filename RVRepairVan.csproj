@@ -1,5 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <!-- Optional Snitch profiler in Debug builds (no-op when the Snitch host is absent). -->
+  <Import Project="$(MSBuildThisFileDirectory)../Workspace/build/Snitch.props" />
+
   <!--
     RVRepairVan - MelonLoader mod for Schedule I.
     Dual-backend capable (extends the Mimesis-InventoryExpansion template):
