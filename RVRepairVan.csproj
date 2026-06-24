@@ -1,7 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Optional Snitch profiler in Debug builds (no-op when the Snitch host is absent). -->
-  <Import Project="$(MSBuildThisFileDirectory)../Workspace/build/Snitch.props" />
+  <!-- Optional Snitch profiler in Debug builds (no-op when the Snitch host is absent, e.g. CI, which only
+       checks out Workspace/lib and not Workspace/build). -->
+  <Import Project="$(MSBuildThisFileDirectory)../Workspace/build/Snitch.props" Condition="Exists('$(MSBuildThisFileDirectory)../Workspace/build/Snitch.props')" />
 
   <!--
     RVRepairVan - MelonLoader mod for Schedule I.
