@@ -58,6 +58,12 @@ namespace RVRepairVan.Quests
         private static Transform _donnaT, _mingT, _marcoT;
         private static DialogueController.DialogueChoice _marcoRepairChoice;
 
+        // Sample picker: one Marco dialogue choice per packaged product the player holds (so they choose WHICH to
+        // hand over). Capped at the hotbar size; _sampleSlots is the live snapshot the choices/handler index into.
+        private const int MAX_SAMPLE_CHOICES = 8;
+        private static readonly DialogueController.DialogueChoice[] _sampleChoices = new DialogueController.DialogueChoice[MAX_SAMPLE_CHOICES];
+        private static readonly System.Collections.Generic.List<ItemSlot> _sampleSlots = new System.Collections.Generic.List<ItemSlot>();
+
         // The host is authoritative: any host-side write to Stage / DiscountTotal auto-replicates to all clients
         // (single StageSync broadcast). Offline and client writes don't broadcast (client writes only happen via
         // ApplyStageSync, which uses RepairStateStore directly to avoid echoing). This is the one choke point that
@@ -132,6 +138,8 @@ namespace RVRepairVan.Quests
             _cratePoint = Vector3.zero;
             _donnaT = _mingT = _marcoT = null;
             _marcoRepairChoice = null;
+            System.Array.Clear(_sampleChoices, 0, _sampleChoices.Length);
+            _sampleSlots.Clear();
         }
 
         internal static void Start()
@@ -175,7 +183,22 @@ namespace RVRepairVan.Quests
                 }
             }
             if (myGen == _gen)
+            {
                 Core.LogDebug($"[Questline] all NPC dialogue injected: Donna={_donnaDone} Ming={_mingDone} Marco={_marcoDone}");
+                // The NPC transforms are only resolved now. On a fresh load RestoreCoroutine's first SyncEntry runs on
+                // a fixed ~4s timer - often BEFORE Marco/Ming exist - so MarcoPos() falls back to RvPos()/zero and the
+                // quest POI (the wrench marker) is left pointing nowhere, never re-pointed. Re-sync once here with the
+                // real positions (host/offline only; a co-op client's POI is driven by the host snapshot).
+                try
+                {
+                    if (!(NetworkBus.Online && !NetworkBus.IsServer) && Active && Stage >= Started && Stage < Done)
+                    {
+                        EnsureQuest();
+                        Core.LogDebug("[Questline] post-inject POI re-sync (Marco resolved=" + (_marcoT != null) + ").");
+                    }
+                }
+                catch (Exception e) { Core.Log.Warning("[Questline] post-inject POI sync failed: " + e.Message); }
+            }
         }
 
         // Inject each NPC independently, looked up by id in the game's NPC registry.
@@ -279,10 +302,15 @@ namespace RVRepairVan.Quests
             AddChoice(marco, "I lost your package.", 96,
                 () => Active && _pickupActive && _hasPackage && _pkgPlaced && !PlayerHasItem(PackageId), null, lostpkg);
 
-            // Sample option only appears while you're actually holding packaged product (and there's still room
-            // above the price floor). Trust must already be earned (Stage >= Trusted).
-            AddChoice(marco, "Give Marco a packaged sample", 95,
-                () => Active && Trusted_ && Stage < Paid && HoldingPackaged() && CurrentPrice() > RVRepairVanPreferences.RepairPrice, OnGiveSample);
+            // One sample entry per packaged product the player holds, so they pick WHICH to hand over. Each entry is
+            // shown live (SampleChoiceVisible) only while trust is earned (Stage >= Trusted) and the price is still
+            // above the floor; its label is set to that product's name + per-unit value right before it's drawn.
+            for (int s = 0; s < MAX_SAMPLE_CHOICES; s++)
+            {
+                int idx = s;
+                _sampleChoices[idx] = AddChoice(marco, "Give Marco a packaged sample", 95 - idx,
+                    () => SampleChoiceVisible(idx), () => OnGiveSample(idx));
+            }
 
             // Persistent reminder once trust is earned: tells players (who may have skipped the dialogue) HOW to
             // keep lowering the price. Shows whenever they're NOT currently holding product to hand over (when they
@@ -649,33 +677,37 @@ namespace RVRepairVan.Quests
             SyncEntry();
         }
 
-        private static void OnGiveSample()
+        // Give Marco one packaged product. i indexes the snapshot the choice list was built from (RefreshSampleSlots),
+        // so the player hands over exactly the product they picked; falls back to the first packaged product if the
+        // index is stale. Reads from inventory (not the equipped item, which is null during a conversation).
+        private static void OnGiveSample(int i)
         {
             try
             {
-                PlayerInventory inv = PlayerSingleton<PlayerInventory>.Instance;
-                ProductItemInstance product = inv?.EquippedItem?.TryCast<ProductItemInstance>();
+                RefreshSampleSlots();
+                ItemSlot slot = (i >= 0 && i < _sampleSlots.Count) ? _sampleSlots[i] : FindPackagedProductSlot();
+                ProductItemInstance product = slot?.ItemInstance?.TryCast<ProductItemInstance>();
                 if (product == null || product.AppliedPackaging == null)
                 {
                     WorldSay(_marcoT, "That ain't packaged. Hand me something sealed.");
                     return;
                 }
-                int discount = Mathf.Clamp(Mathf.RoundToInt(product.GetMonetaryValue()),
-                    RVRepairVanPreferences.MinSampleDiscount, RVRepairVanPreferences.MaxSampleDiscount);
+                int discount = SampleUnitDiscount(product);
 
-                // Marco TAKES it and consumes it (real consume animation + effects), like handing a free sample
-                // to a non-customer. We pass removeFromInventory:FALSE and remove exactly ONE unit ourselves:
-                // SendProduct's native removal quantity is unverifiable (body lives in GameAssembly.dll) and could
-                // wipe a whole stack >1. Removing one deterministically protects the player's stack either way.
+                // Marco actually consumes it: NPCBehaviour.ConsumeProduct (the ServerRpc the vanilla sample flow uses)
+                // both sets the product AND enables the consume behaviour, so he plays the smoke/snort/eat animation,
+                // sound and particles and the product's effects apply to him - and it replicates in co-op. Earlier we
+                // only called SendProduct (sets the product, never starts the behaviour), so nothing happened visibly.
+                // removeFromInventory:FALSE - that flag only touches the NPC's own inventory; we remove exactly one
+                // unit from the player ourselves below (deterministic; protects a stack > 1).
                 NPC marco = FindNpc(MarcoId);
-                var cpb = (marco != null && marco.Behaviour != null) ? marco.Behaviour.ConsumeProductBehaviour : null;
-                int before = (inv != null && inv.equippedSlot != null) ? inv.equippedSlot.Quantity : -1;
-                if (cpb != null) cpb.SendProduct(product, false);   // consume/animate, but don't let it touch inventory
-                if (inv != null && inv.equippedSlot != null) RemoveOneFromSlot(inv.equippedSlot);   // exactly one (clears the slot if it was the last)
-                int after = (inv != null && inv.equippedSlot != null) ? inv.equippedSlot.Quantity : -1;
-                Core.LogDebug("[Questline] sample given: equipped qty " + before + " -> " + after + " (expected -1).");
+                int before = slot != null ? slot.Quantity : -1;
+                if (marco != null && marco.Behaviour != null) marco.Behaviour.ConsumeProduct(product, false);
+                RemoveOneFromSlot(slot);   // exactly one from the slot we found (clears it if it was the last)
+                int after = slot != null ? slot.Quantity : -1;
+                Core.LogDebug("[Questline] sample given: hotbar qty " + before + " -> " + after + " (expected -1).");
 
-                // The consume above is the ACTING player's local action (per-player inventory; SendProduct is a
+                // The consume above is the ACTING player's local action (per-player inventory; ConsumeProduct is a
                 // ServerRpc so Marco's eating replicates). The DISCOUNT is shared state - the host owns it. Client:
                 // send the discount it computed and let the host apply + replicate the new price.
                 if (RouteIntent(RvOp.GiveSample, discount))
@@ -686,6 +718,68 @@ namespace RVRepairVan.Quests
                 HostGiveSample(discount);   // host or offline
             }
             catch (Exception e) { Core.Log.Warning("[Questline] give sample failed: " + e.Message); }
+        }
+
+        // Per-sample discount = the value of the ONE package handed over, NOT the whole stack. GetMonetaryValue() is
+        // MarketValue * Quantity * Amount (scales with stack size), so divide by Quantity to get a single unit's
+        // worth, then clamp to the configured min/max.
+        private static int SampleUnitDiscount(ProductItemInstance p)
+        {
+            int qty = Mathf.Max(1, ((BaseItemInstance)p).Quantity);
+            // Per-package value (GetMonetaryValue already folds in product type + effects via MarketValue, and the
+            // packaging size via Amount) times a Marco-specific quality bonus/penalty, finally clamped to min/max.
+            float unit = (p.GetMonetaryValue() / qty) * QualityMultiplier(p.Quality);
+            return Mathf.Clamp(Mathf.RoundToInt(unit), RVRepairVanPreferences.MinSampleDiscount, RVRepairVanPreferences.MaxSampleDiscount);
+        }
+
+        // Marco pays more for cleaner product, less for junk. The game's own monetary value is quality-independent,
+        // so this is a Marco-only sweetener. EQuality order: Trash, Poor, Standard, Premium, Heavenly.
+        private static float QualityMultiplier(EQuality q)
+        {
+            switch (q)
+            {
+                case EQuality.Trash: return 0.6f;
+                case EQuality.Poor: return 0.8f;
+                case EQuality.Premium: return 1.5f;
+                case EQuality.Heavenly: return 2.0f;
+                default: return 1.0f;   // Standard
+            }
+        }
+
+        // Snapshot every inventory slot currently holding a packaged product (capped at the choice count). Rebuilt
+        // each time the choices are evaluated/picked so the list always reflects what the player holds right now.
+        private static void RefreshSampleSlots()
+        {
+            _sampleSlots.Clear();
+            var slots = PlayerSingleton<PlayerInventory>.Instance?.GetAllInventorySlots();
+            if (slots == null) return;
+            for (int i = 0; i < slots.Count && _sampleSlots.Count < MAX_SAMPLE_CHOICES; i++)
+            {
+                ItemSlot slot = slots[i];
+                ProductItemInstance p = slot?.ItemInstance?.TryCast<ProductItemInstance>();
+                if (p != null && p.AppliedPackaging != null) _sampleSlots.Add(slot);
+            }
+        }
+
+        // Live visibility + label for the i-th sample choice. Shown only with trust earned and room above the floor;
+        // refreshes the snapshot and (the game calls this right before drawing) sets this entry's label to the i-th
+        // packaged product's name + per-unit value.
+        private static bool SampleChoiceVisible(int i)
+        {
+            if (!(Active && Trusted_ && Stage < Paid && CurrentPrice() > RVRepairVanPreferences.RepairPrice)) return false;
+            RefreshSampleSlots();
+            if (i >= _sampleSlots.Count) return false;
+            ProductItemInstance p = _sampleSlots[i]?.ItemInstance?.TryCast<ProductItemInstance>();
+            if (p == null) return false;
+            if (_sampleChoices[i] != null) _sampleChoices[i].ChoiceText = SampleChoiceText(p);
+            return true;
+        }
+
+        private static string SampleChoiceText(ProductItemInstance p)
+        {
+            string name = "product";
+            try { ItemDefinition def = p.Definition; if (def != null) name = def.Name; } catch { }
+            return "Give Marco: " + name + " (-" + MoneyManager.FormatAmount(SampleUnitDiscount(p)) + ")";
         }
 
         // Host-only (or offline): apply a sample's discount to the shared price. Safe when the host is processing a
@@ -1034,16 +1128,28 @@ namespace RVRepairVan.Quests
             return choice;
         }
 
-        /// <summary>True if the player is currently holding a PACKAGED product (peek only, no consume).</summary>
-        private static bool HoldingPackaged()
+        /// <summary>True if the player has a PACKAGED product anywhere in the hotbar (peek only, no consume).</summary>
+        private static bool HoldingPackaged() => FindPackagedProductSlot() != null;
+
+        /// <summary>The inventory slot holding a PACKAGED product, or null. Scans GetAllInventorySlots (hotbar +
+        /// cash) - the exact source the vanilla HandoverScreen sample flow reads - instead of the equipped item:
+        /// opening an NPC conversation holsters/unequips the player, so EquippedItem and equippedSlot both go null
+        /// mid-dialogue even though the sealed product is still in the inventory.</summary>
+        private static ItemSlot FindPackagedProductSlot()
         {
             try
             {
-                PlayerInventory inv = PlayerSingleton<PlayerInventory>.Instance;
-                ProductItemInstance p = inv?.EquippedItem?.TryCast<ProductItemInstance>();
-                return p != null && p.AppliedPackaging != null;
+                var slots = PlayerSingleton<PlayerInventory>.Instance?.GetAllInventorySlots();
+                if (slots == null) return null;
+                for (int i = 0; i < slots.Count; i++)
+                {
+                    ItemSlot slot = slots[i];
+                    ProductItemInstance p = slot?.ItemInstance?.TryCast<ProductItemInstance>();
+                    if (p != null && p.AppliedPackaging != null) return slot;
+                }
             }
-            catch { return false; }
+            catch { }
+            return null;
         }
 
         private static void RefreshRepairChoice()

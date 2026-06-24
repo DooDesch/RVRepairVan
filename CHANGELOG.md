@@ -4,6 +4,28 @@ All notable changes to RVRepairVan are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 project adheres to Semantic Versioning.
 
+## [2.1.0] - 2026-06-24
+
+### Fixed
+- Giving Marco a packaged sample no longer fails with "That ain't packaged" while you are
+  holding sealed product. The check now reads your inventory instead of the in-hand item,
+  which the game empties while a conversation is open.
+- Each sample's discount is now based on the value of the single package you hand over,
+  rather than scaling with how many were left in the stack.
+- The quest marker (the wrench) could end up pointing nowhere after returning to the main
+  menu and reloading a save; it now re-points to the right target once the world finishes
+  loading.
+
+### Added
+- You can now choose which packaged product to give Marco: the dialogue lists each packaged
+  product you are carrying together with the discount it would give.
+- Marco actually consumes the sample you hand him now (the matching smoke/snort/eat
+  animation and effects), instead of just taking it.
+- Marco pays more for cleaner product and less for junk: the per-sample discount is scaled
+  by quality (Trash 0.6x up to Heavenly 2.0x).
+- Experimental host-authoritative co-op support. Single-player is unaffected; co-op has
+  only had limited testing, so please report any multiplayer issues.
+
 ## [2.0.1] - 2026-06-17
 
 ### Added
