@@ -93,8 +93,14 @@ namespace RVRepairVan.Quests
         private static bool MarcoGreeted => Stage >= MarcoMet;   // asked Marco "can you fix it"
         private static bool ReferralUsed => Stage >= ReadyToPay;  // you actually told Marco - price is 10k
         private static bool Trusted_ => Stage >= Trusted;         // did Marco's pickup - packaged samples unlocked
-        // A wrecked RV needs repairing - availability is driven purely by IsDestroyed().
-        private static bool Active => RVRepairVanPreferences.Enabled && RVManager.IsDestroyed();
+        // A wrecked RV needs repairing - availability is driven by IsDestroyed(). On a co-op CLIENT, RV.IsDestroyed
+        // is host-owned and only pushed at join (OnSpawnServer), so a wreck that happens AFTER the client joined
+        // never reaches it - the client would then hide every quest choice (e.g. Donna's) even though the host's
+        // quest is live and its Stage synced. So a client also trusts the synced Stage: an active quest
+        // (Started up to before Paid) means the host has a wrecked RV by definition. Host/offline keep the direct check.
+        private static bool Active => RVRepairVanPreferences.Enabled
+            && (RVManager.IsDestroyed()
+                || (NetworkBus.Online && !NetworkBus.IsServer && Stage >= Started && Stage < Paid));
 
         internal static int CurrentPrice()
         {
@@ -140,16 +146,38 @@ namespace RVRepairVan.Quests
             _marcoRepairChoice = null;
             System.Array.Clear(_sampleChoices, 0, _sampleChoices.Length);
             _sampleSlots.Clear();
+            RepairStateStore.ResetClient();   // co-op client mirror starts clean each scene load (host re-sends snapshot)
         }
 
         internal static void Start()
         {
             InitNet();
+            MelonCoroutines.Start(EnsureItemsCoroutine());   // host AND client: register quest items so both can see them in drops
             MelonCoroutines.Start(SetupCoroutine());
             MelonCoroutines.Start(ProximityCoroutine());
             MelonCoroutines.Start(RestoreCoroutine());
             MelonCoroutines.Start(NetJoinCoroutine());
         }
+
+#if DEBUG
+        // Debug: skip the questline straight to a stage. Run ON THE HOST - the Stage setter broadcasts StageSync to
+        // clients, so both jump together. Lets testing bypass the dead-drop errands. SyncEntry re-renders journal/POI.
+        internal static void DebugSetStage(int n)
+        {
+            Stage = n;
+            SyncEntry();
+            Core.Log.Msg("[Debug] rvstage -> Stage=" + n + " (host=" + NetworkBus.IsServer + ")");
+        }
+
+        // Debug: forget the reserved errand drops so the host re-reserves a FRESH one (nearest empty to the NPC) on
+        // the next tick - used by rvclear after wiping accumulated test crates, so the drop lands near Ming again.
+        internal static void DebugResetErrandDrop()
+        {
+            _cratePoint = Vector3.zero; _crateDrop = null;
+            _dropPoint = Vector3.zero; _drop = null;
+            Core.Log.Msg("[Debug] errand drop reservation reset.");
+        }
+#endif
 
         /// <summary>After a save loads, re-create + re-sync the journal quest at the stored stage.</summary>
         private static IEnumerator RestoreCoroutine()
@@ -253,7 +281,7 @@ namespace RVRepairVan.Quests
             var deliver = S1Container(npc, "rv_ming_deliver", b => b
                 .AddNode("ENTRY", "Good. Go see Marco at the body shop down by the docks. Tell him Mrs. Ming sent you."));
             AddChoice(ming, "Here's your crate.", 91,
-                () => Active && Stage == MingCrate && (!_cratePlaced || PlayerHasItem(CrateId)), OnDeliverCrate, deliver);
+                () => Active && Stage == MingCrate && PlayerHasItem(CrateId), OnDeliverCrate, deliver);
 
             // Loss fallback: collected the drop but no longer holding the crate -> admit it, pay the fee or defer.
             var lost = S1Container(npc, "rv_ming_lost", b => b
@@ -263,7 +291,7 @@ namespace RVRepairVan.Quests
                 .AddNode("MING_LOSS_DEFER", MingShort));
             OnPick(npc, "MING_PAY", OnMingPayLoss);
             AddChoice(ming, "I lost your crate.", 90,
-                () => Active && Stage == MingCrate && _cratePlaced && !PlayerHasItem(CrateId), null, lost);
+                () => Active && Stage == MingCrate && !PlayerHasItem(CrateId), null, lost);
             Core.LogDebug("[Questline] Ming dialogue injected.");
         }
 
@@ -290,7 +318,7 @@ namespace RVRepairVan.Quests
             var gotpkg = S1Container(npc, "rv_marco_gotpkg", b => b
                 .AddNode("ENTRY", "Good. You can follow instructions. Bring me some of that good stuff now and then, and I'll keep shaving down the bill."));
             AddChoice(marco, "Got your package.", 96,
-                () => Active && _pickupActive && _hasPackage && (!_pkgPlaced || PlayerHasItem(PackageId)), OnGotPackage, gotpkg);
+                () => Active && _pickupActive && _hasPackage && PlayerHasItem(PackageId), OnGotPackage, gotpkg);
 
             // Loss fallback: collected the drop but no longer holding the package -> admit it, pay the fee or defer.
             var lostpkg = S1Container(npc, "rv_marco_lost", b => b
@@ -300,7 +328,7 @@ namespace RVRepairVan.Quests
                 .AddNode("MARCO_LOSS_DEFER", MarcoShort));
             OnPick(npc, "MARCO_PAY", OnMarcoPayLoss);
             AddChoice(marco, "I lost your package.", 96,
-                () => Active && _pickupActive && _hasPackage && _pkgPlaced && !PlayerHasItem(PackageId), null, lostpkg);
+                () => Active && _pickupActive && _hasPackage && !PlayerHasItem(PackageId), null, lostpkg);
 
             // One sample entry per packaged product the player holds, so they pick WHICH to hand over. Each entry is
             // shown live (SampleChoiceVisible) only while trust is earned (Stage >= Trusted) and the price is still
@@ -526,8 +554,10 @@ namespace RVRepairVan.Quests
         private static void OnDeliverCrate()
         {
             // The crate leaves the ACTING player's own inventory (PlayerInventory is per-player) - do that locally
-            // on whoever picked the choice, then ask the host to advance the shared stage.
-            if (_cratePlaced) RemovePlayerItem(CrateId);   // hand the crate over (acting player's hotbar)
+            // on whoever picked the choice, then ask the host to advance the shared stage. Unconditional (no-op if the
+            // player is not holding it): _cratePlaced is reset to false on a client once the stage advances past the
+            // drop, so gating the removal on it skipped it on the client (the crate stayed in the client's hotbar).
+            RemovePlayerItem(CrateId);   // hand the crate over (acting player's hotbar)
             if (RouteIntent(RvOp.DeliverCrate)) return;
             HostDeliverCrate();   // host or offline
         }
@@ -647,7 +677,8 @@ namespace RVRepairVan.Quests
         private static void OnGotPackage()
         {
             // Package leaves the ACTING player's own inventory locally, then the host advances the shared stage.
-            if (_pkgPlaced) RemovePlayerItem(PackageId);   // hand the package over (acting player's hotbar)
+            // Unconditional (no-op if not held) - _pkgPlaced is unreliable on a client once the stage moves on.
+            RemovePlayerItem(PackageId);   // hand the package over (acting player's hotbar)
             if (RouteIntent(RvOp.GotPackage)) return;
             HostGotPackage();   // host or offline
         }
@@ -833,6 +864,12 @@ namespace RVRepairVan.Quests
             if (_itemsRegistered) return;
             try
             {
+                // Register on BOTH host AND client (called from a startup coroutine, not only the host's PlaceItem).
+                // The CLIENT must register these too or it cannot DESERIALISE the crate/package the host placed into
+                // the networked dead-drop storage - the drop then looks empty to the client (vanilla items work
+                // precisely because they are registered everywhere). Wait until the game's own items are loaded so
+                // CloneFrom has a real base (registering too early would lock in a model-less fallback).
+                if (S1API.Items.ItemManager.GetDefinition("grainbag") == null) return;   // game items not ready yet
                 DumpItemsOnce();   // DEBUG only: list every item id/name (clone-base reference)
                 // Carry-only bases (a sack / a bag), NOT furniture - inherits a real icon + in-hand model.
                 // Tried in order; first that clones wins. grainbag/trashbag are StorableItemDefinition subclasses.
@@ -841,8 +878,21 @@ namespace RVRepairVan.Quests
                 RegisterItem(PackageId, "Marco's Package", "A package Marco left at a drop. Don't make it weird.",
                     new[] { "trashbag", "grainbag", "flashlight" });
                 _itemsRegistered = true;
+                Core.LogDebug("[Questline] quest items registered (host+client).");
             }
             catch (Exception e) { Core.Log.Warning("[Questline] item register failed: " + e.Message); }
+        }
+
+        // Register the quest items as soon as the game's items are loaded - on the CLIENT too, so it can reconstruct
+        // them from the dead-drop storage the host fills. Retries because game items load a moment after scene load.
+        private static IEnumerator EnsureItemsCoroutine()
+        {
+            for (int i = 0; i < 30 && !_itemsRegistered; i++)
+            {
+                EnsureItems();
+                if (_itemsRegistered) yield break;
+                yield return new WaitForSeconds(1f);
+            }
         }
 
         // Register a quest item. We CLONE an existing storable item (inherits a real inventory icon + in-hand
@@ -1007,6 +1057,14 @@ namespace RVRepairVan.Quests
                         _clientCheckedRv = true;
                         NetworkBus.SendToHost(RvOp.CheckedRv);
                     }
+                    // The client picked up the current errand item -> tell the host (it can't see the client's
+                    // inventory) so it advances for everyone. Stops once the host's StageSync/TransientSync clears the
+                    // condition (~1-2 sends); the host re-validates and ignores it if the stage already moved on.
+                    else if ((Stage == MingErrand && PlayerHasItem(CrateId))
+                          || (_pickupActive && !_hasPackage && PlayerHasItem(PackageId)))
+                    {
+                        NetworkBus.SendToHost(RvOp.ErrandItemPicked);
+                    }
                     continue;
                 }
 
@@ -1036,18 +1094,23 @@ namespace RVRepairVan.Quests
                     Vector3 p = PlayerPos();
 
                     // Ming's crate: collected once the player empties the marked drop (takes the real item).
-                    // Fallback to proximity when no item could be placed. Re-reserve + re-place after a reload.
+                    // Fallback to proximity when no item could be placed. Re-reserve + re-place after a reload - but
+                    // WAIT for Ming's transform: on load this loop runs before NPC injection finishes, and reserving
+                    // with the RV-position fallback picked a drop across the map instead of the one nearest Ming.
                     if (Stage == MingErrand)
                     {
-                        if (_cratePoint == Vector3.zero)
+                        if (_cratePoint == Vector3.zero && _mingT != null)
                         {
-                            _crateDrop = ReserveDeadDrop(_mingT != null ? _mingT.position : RvPos());
-                            _cratePoint = _crateDrop != null ? _crateDrop.Position
-                                : (_mingT != null ? _mingT.position + new Vector3(8f, 0f, 8f) : RvPos());
+                            _crateDrop = ReserveDeadDrop(_mingT.position);
+                            _cratePoint = _crateDrop != null ? _crateDrop.Position : _mingT.position + new Vector3(8f, 0f, 8f);
                             _cratePlaced = PlaceItem(_crateDrop, CrateId);
                             SyncEntry();
                         }
-                        bool got = _cratePlaced ? (_crateDrop != null && _crateDrop.IsEmpty)
+                        // "Collected" = a player now HOLDS the crate (robust + works for either player), NOT the drop's
+                        // IsEmpty (which proved fragile across reloads / co-op - stale wrappers, re-sync, leftovers).
+                        // The host detects its own pickup here; a client reports its pickup via the ErrandItemPicked
+                        // intent (handled host-side). Proximity stays the no-item fallback.
+                        bool got = _cratePlaced ? PlayerHasItem(CrateId)
                                                 : (_cratePoint != Vector3.zero && Dist(p, _cratePoint) < 5f);
                         if (got) { Stage = MingCrate; SyncEntry(); }
                     }
@@ -1055,7 +1118,7 @@ namespace RVRepairVan.Quests
                     // Marco's package: collected once the player empties the drop (real item), else proximity.
                     if (_pickupActive && !_hasPackage)
                     {
-                        bool got = _pkgPlaced ? (_drop != null && _drop.IsEmpty)
+                        bool got = _pkgPlaced ? PlayerHasItem(PackageId)
                                               : (Dist(p, _dropPoint) < 5f);
                         if (got) { _hasPackage = true; SyncEntry(); }
                     }

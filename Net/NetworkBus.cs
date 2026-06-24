@@ -51,27 +51,27 @@ namespace RVRepairVan.Net
         }
 
         /// <summary>Client -> host intent (rides SendQuestState, a ServerRpc). Harmless to call on the host too.</summary>
-        internal static void SendToHost(RvOp op, int a = 0, int b = 0)
+        internal static void SendToHost(RvOp op, int a = 0, int b = 0, int c = 0)
         {
             try
             {
                 var qm = Qm;
                 if (qm == null) { Core.Log.Warning("[Net] no QuestManager - intent " + op + " dropped."); return; }
-                qm.SendQuestState(RvMsg.Encode(op, a, b), EQuestState.Inactive);
-                Core.LogDebug("[Net] -> host " + op + "(" + a + "," + b + ")");
+                qm.SendQuestState(RvMsg.Encode(op, a, b, c), EQuestState.Inactive);
+                Core.LogDebug("[Net] -> host " + op + "(" + a + "," + b + "," + c + ")");
             }
             catch (Exception e) { Core.Log.Warning("[Net] SendToHost failed: " + e.Message); }
         }
 
         /// <summary>Host -> all clients state (rides ReceiveQuestState, an ObserversRpc). Server only.</summary>
-        internal static void BroadcastToAll(RvOp op, int a = 0, int b = 0)
+        internal static void BroadcastToAll(RvOp op, int a = 0, int b = 0, int c = 0)
         {
             try
             {
                 var qm = Qm;
                 if (qm == null) return;
-                qm.ReceiveQuestState(null, RvMsg.Encode(op, a, b), EQuestState.Inactive);
-                Core.LogDebug("[Net] broadcast " + op + "(" + a + "," + b + ")");
+                qm.ReceiveQuestState(null, RvMsg.Encode(op, a, b, c), EQuestState.Inactive);
+                Core.LogDebug("[Net] broadcast " + op + "(" + a + "," + b + "," + c + ")");
             }
             catch (Exception e) { Core.Log.Warning("[Net] BroadcastToAll failed: " + e.Message); }
         }
@@ -85,8 +85,20 @@ namespace RVRepairVan.Net
 
         internal static void DispatchClientState(RvMsg m)
         {
-            Core.LogDebug("[Net] client <- " + m);
-            try { OnClientState?.Invoke(m); } catch (Exception e) { Core.Log.Warning("[Net] client dispatch failed: " + e.Message); }
+            Core.LogDebug("[Net] " + (IsServer ? "host <- (relayed) " : "client <- ") + m);
+            try
+            {
+                // On a listen-server the game relays a client's SendQuestState (our intents) to ALL observers via
+                // ReceiveQuestState, so the HOST actually receives client intents through THIS path - not through the
+                // SendQuestState RpcLogic prefix (which does not fire for a remote client's call on this build). Route
+                // by role: the host treats an incoming message as an intent (OnServerIntent), clients as host state
+                // (OnClientState). The two delivery paths stay mutually exclusive - if the SendQuestState prefix ever
+                // does intercept, it skips the relay - so an intent is never processed twice; and each op switch
+                // ignores any message meant for the other role.
+                if (IsServer) OnServerIntent?.Invoke(m);
+                else OnClientState?.Invoke(m);
+            }
+            catch (Exception e) { Core.Log.Warning("[Net] dispatch failed: " + e.Message); }
         }
 
         internal static void Init(HarmonyLib.Harmony h)

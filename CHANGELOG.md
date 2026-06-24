@@ -4,6 +4,24 @@ All notable changes to RVRepairVan are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 project adheres to Semantic Versioning.
 
+## [2.2.0] - 2026-06-24
+
+### Fixed
+- Multiplayer co-op now works end to end and has been verified in a real two-player session:
+  both players can play through the entire repair questline together. The previous build shipped
+  co-op as experimental; this release fixes the issues that kept it from working.
+- The joining player now gets the repair quest from Donna and sees the same quest progress as
+  the host, instead of having no dialogue option or a different quest state.
+- Both players can see, pick up, carry and hand in the errand items (Ming's crate, Marco's
+  package). The quest advances no matter which player makes the delivery, and the pay-instead
+  fallback still applies if the item is lost.
+- The dead-drop marker now points to a valid drop for the joining player; previously the marker
+  could lead to nothing on the client.
+- Giving Marco samples to lower the price works for the joining player too, and the discount
+  stays in sync for both players.
+- Quest items are now reliably removed from the joining player's inventory once they are
+  handed in.
+
 ## [2.1.0] - 2026-06-24
 
 ### Fixed

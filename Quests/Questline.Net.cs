@@ -87,6 +87,7 @@ namespace RVRepairVan.Quests
                     case RvOp.GiveSample: HostGiveSample(m.A); break;   // A = discount the client computed
                     case RvOp.PayRepair: HostPayRepair(false); break;  // no cinematic on the host for a client's repair
                     case RvOp.CheckedRv: HostCheckedRv(); break;       // a client reached the post-repair RV
+                    case RvOp.ErrandItemPicked: HostErrandItemPicked(); break;  // a client picked up the crate/package
                     case RvOp.RequestSnapshot: HostSendSnapshot(); break;
 #if DEBUG
                     case RvOp.Ping: Core.Log.Msg("[Net] host <- Ping " + m.A); break;
@@ -104,10 +105,11 @@ namespace RVRepairVan.Quests
                 switch (m.Op)
                 {
                     case RvOp.StageSync: ApplyStageSync(m.A, m.B); break;
-                    case RvOp.TransientSync: ApplyTransient(m.A, m.B); break;
+                    case RvOp.TransientSync: ApplyTransient(m.A, m.B, m.C); break;
                     case RvOp.RepairApplied: ApplyRepair(); break;
 #if DEBUG
                     case RvOp.Ping: Core.Log.Msg("[Net] client <- Ping " + m.A); break;
+                    case RvOp.DebugGiveItems: RVRepairVan.Patches.DebugConsolePatch.GiveTestProducts("jar", "ogkush"); break;
 #endif
                 }
             }
@@ -120,7 +122,34 @@ namespace RVRepairVan.Quests
             NetworkBus.BroadcastToAll(RvOp.StageSync, Stage, DiscountTotal);
             HostBroadcastTransient();
             if (RepairStateStore.GetRepaired()) NetworkBus.BroadcastToAll(RvOp.RepairApplied);
+            HostResyncErrandItem();
             Core.LogDebug("[Net] host snapshot sent: Stage=" + Stage + " Discount=" + DiscountTotal + " Repaired=" + RepairStateStore.GetRepaired());
+        }
+
+        /// <summary>
+        /// Re-insert the active errand item (Ming's crate / Marco's package) when a client requests a snapshot - i.e.
+        /// just joined. A storage slot set BEFORE a client became an observer may not reach it, so the item placed at
+        /// the host's load is invisible to a late joiner. Clearing + re-inserting now (with the client observing) sends
+        /// a live slot update that replicates. Host-only; the drop is still the same one, so no duplicate persists.
+        /// </summary>
+        private static void HostResyncErrandItem()
+        {
+            try
+            {
+                if (Stage == MingErrand && _crateDrop != null && _cratePlaced)
+                {
+                    _crateDrop.Storage.RemoveAllOfDefinition(CrateId);
+                    PlaceItem(_crateDrop, CrateId);
+                    Core.LogDebug("[Net] host re-synced Ming's crate to a joining client.");
+                }
+                if (_pickupActive && !_hasPackage && _drop != null && _pkgPlaced)
+                {
+                    _drop.Storage.RemoveAllOfDefinition(PackageId);
+                    PlaceItem(_drop, PackageId);
+                    Core.LogDebug("[Net] host re-synced Marco's package to a joining client.");
+                }
+            }
+            catch (Exception e) { Core.Log.Warning("[Net] errand item re-sync failed: " + e.Message); }
         }
 
         /// <summary>Client: adopt the host's authoritative stage + discount and re-render the journal/price.</summary>
@@ -146,20 +175,23 @@ namespace RVRepairVan.Quests
         private static void HostBroadcastTransient()
         {
             int flags = (_pickupActive ? 1 : 0) | (_hasPackage ? 2 : 0);
-            int idx = -1;
-            if (_pickupActive) idx = IndexOfDrop(_drop);
-            else if (Stage == MingErrand) idx = IndexOfDrop(_crateDrop);
-            NetworkBus.BroadcastToAll(RvOp.TransientSync, flags, idx);
+            // Sync the active dead drop by WORLD POSITION (rounded), NOT an index into DeadDropManager.All - that
+            // collection is not identically ordered on host and client, so an index pointed the client's marker at
+            // the wrong drop (or nowhere). Position is order-independent; the client matches the nearest drop to it.
+            Vector3 dp = Vector3.zero;
+            if (_pickupActive) dp = _drop != null ? _drop.Position : _dropPoint;
+            else if (Stage == MingErrand) dp = _crateDrop != null ? _crateDrop.Position : _cratePoint;
+            NetworkBus.BroadcastToAll(RvOp.TransientSync, flags, Mathf.RoundToInt(dp.x), Mathf.RoundToInt(dp.z));
         }
 
         /// <summary>Client: adopt the host's transient pickup state + resolve the active dead drop, then re-render.</summary>
-        private static void ApplyTransient(int flags, int idx)
+        private static void ApplyTransient(int flags, int x, int z)
         {
             if (NetworkBus.IsServer) return;
             _pickupActive = (flags & 1) != 0;
             _hasPackage = (flags & 2) != 0;
-            var drop = ResolveDrop(idx);
-            Vector3 pos = drop != null ? drop.Position : Vector3.zero;
+            var drop = ResolveDropByPos(x, z);
+            Vector3 pos = drop != null ? drop.Position : (x == 0 && z == 0 ? Vector3.zero : new Vector3(x, 0f, z));
             if (_pickupActive)
             {
                 _drop = drop; _pkgPlaced = drop != null; _dropPoint = pos;
@@ -169,35 +201,32 @@ namespace RVRepairVan.Quests
                 _crateDrop = drop; _cratePlaced = drop != null; _cratePoint = pos;
             }
             SyncEntry();
-            Core.LogDebug("[Net] client applied TransientSync: pickup=" + _pickupActive + " hasPkg=" + _hasPackage + " dropIdx=" + idx);
+            Core.LogDebug("[Net] client applied TransientSync: pickup=" + _pickupActive + " hasPkg=" + _hasPackage
+                + " dropPos=(" + x + "," + z + ") resolved=" + (drop != null));
         }
 
-        // DeadDropManager.All is assumed to be identically ordered on host + client (same scene/build => deterministic
-        // registration). If that ever fails, only the client's drop MARKER is wrong - the host still drives the
-        // pickup detection + stage advancement, so the quest still completes. Index, not reference: S1API may hand
-        // back fresh wrapper instances per call, so we match by position to find the index.
-        private static int IndexOfDrop(S1API.DeadDrops.DeadDropInstance d)
+        // Resolve the synced dead drop by WORLD POSITION (rounded x/z), not by index: DeadDropManager.All is NOT
+        // guaranteed identically ordered on host and client, so an index could resolve to the wrong drop or none
+        // (the client's marker pointed into nothing). Matching the nearest drop to the broadcast position is
+        // order-independent - drops sit metres apart, so the ~1m rounding error is unambiguous. Returns null if
+        // nothing is within tolerance (e.g. the drops are not registered on the client yet; the host re-broadcasts).
+        private static S1API.DeadDrops.DeadDropInstance ResolveDropByPos(int x, int z)
         {
             try
             {
-                if (d == null) return -1;
+                if (x == 0 && z == 0) return null;
                 var all = S1API.DeadDrops.DeadDropManager.All;
-                if (all == null) return -1;
+                if (all == null) return null;
+                S1API.DeadDrops.DeadDropInstance best = null;
+                float bestSq = float.MaxValue;
                 for (int i = 0; i < all.Length; i++)
-                    if (all[i] != null && all[i].Position == d.Position) return i;
-            }
-            catch { }
-            return -1;
-        }
-
-        private static S1API.DeadDrops.DeadDropInstance ResolveDrop(int idx)
-        {
-            try
-            {
-                if (idx < 0) return null;
-                var all = S1API.DeadDrops.DeadDropManager.All;
-                if (all == null || idx >= all.Length) return null;
-                return all[idx];
+                {
+                    if (all[i] == null) continue;
+                    float dx = all[i].Position.x - x, dz = all[i].Position.z - z;
+                    float sq = dx * dx + dz * dz;
+                    if (sq < bestSq) { bestSq = sq; best = all[i]; }
+                }
+                return bestSq <= 9f ? best : null;   // accept only a real match (within ~3 m)
             }
             catch { return null; }
         }
@@ -207,6 +236,14 @@ namespace RVRepairVan.Quests
         /// Called by the host's own proximity loop AND by a client's CheckedRv intent, so either player finishing it
         /// completes the quest for everyone (Stage = Done auto-broadcasts StageSync, which completes it on clients).
         /// </summary>
+        /// <summary>Host: a client reported it picked up the current errand item - advance the matching step for all.
+        /// Re-validated against the host's own Stage so a stale/duplicate intent is a harmless no-op.</summary>
+        private static void HostErrandItemPicked()
+        {
+            if (Stage == MingErrand) { Stage = MingCrate; SyncEntry(); }                 // Ming's crate collected
+            else if (_pickupActive && !_hasPackage) { _hasPackage = true; SyncEntry(); } // Marco's package collected
+        }
+
         private static void HostCheckedRv()
         {
             if (Stage != Paid) return;

@@ -1,26 +1,42 @@
+using RVRepairVan.Net;
+
 namespace RVRepairVan.Persistence
 {
     /// <summary>
-    /// Accessor for the questline's persisted state. Backs onto <see cref="RepairSave"/>, which S1API serialises
-    /// into the game save (written on game-save, read on load) - so reads/writes here are in-memory during play
-    /// and only hit disk when the player actually saves. This is what keeps our state in sync with the game's own
-    /// RV/quest state instead of an immediately-written json that could desync. If the Saveable instance does not
-    /// exist yet (very early, before the first load), reads return defaults and writes no-op.
+    /// Accessor for the questline's persisted state.
+    ///
+    /// HOST / OFFLINE: backs onto <see cref="RepairSave"/>, which S1API serialises into the game save (written on
+    /// game-save, read on load) - so reads/writes are in-memory during play and only hit disk when the player saves.
+    /// This keeps our state in lockstep with the game's own RV/quest state.
+    ///
+    /// CO-OP CLIENT: the state is host-driven and lives in memory here, NOT in <see cref="RepairSave"/>. A joining
+    /// client never runs S1API's load pipeline for its own save (it joins the host's world instead of loading a save),
+    /// so RepairSave stays unloaded and <see cref="RepairSave.BeginLoad"/> wipes its fields - writing the host's synced
+    /// Stage there does not stick (the client's quest state would fall back to 0 and desync from the host). Keeping the
+    /// client's copy in plain static fields makes the host's StageSync the single source of truth on the client.
     /// </summary>
     internal static class RepairStateStore
     {
         private static RepairSave S => RepairSave.Instance;
 
-        internal static bool GetRepaired() => S != null && S.Repaired;
-        internal static void SetRepaired(bool repaired) { if (S != null) S.Repaired = repaired; }
+        // A co-op client mirrors host state here instead of the save-bound RepairSave (see class summary).
+        private static bool ClientMode => NetworkBus.Online && !NetworkBus.IsServer;
+        private static bool _cRepaired;
+        private static int _cStage, _cSamples, _cDiscount;
 
-        internal static int GetStage() => S != null ? S.Stage : 0;
-        internal static void SetStage(int stage) { if (S != null) S.Stage = stage; }
+        /// <summary>Clear the client mirror (called on scene load so a previous co-op session never leaks in).</summary>
+        internal static void ResetClient() { _cRepaired = false; _cStage = 0; _cSamples = 0; _cDiscount = 0; }
 
-        internal static int GetSamples() => S != null ? S.Samples : 0;
-        internal static void SetSamples(int samples) { if (S != null) S.Samples = samples; }
+        internal static bool GetRepaired() => ClientMode ? _cRepaired : (S != null && S.Repaired);
+        internal static void SetRepaired(bool repaired) { if (ClientMode) _cRepaired = repaired; else if (S != null) S.Repaired = repaired; }
 
-        internal static int GetDiscountTotal() => S != null ? S.Discount : 0;
-        internal static void SetDiscountTotal(int discount) { if (S != null) S.Discount = discount; }
+        internal static int GetStage() => ClientMode ? _cStage : (S != null ? S.Stage : 0);
+        internal static void SetStage(int stage) { if (ClientMode) _cStage = stage; else if (S != null) S.Stage = stage; }
+
+        internal static int GetSamples() => ClientMode ? _cSamples : (S != null ? S.Samples : 0);
+        internal static void SetSamples(int samples) { if (ClientMode) _cSamples = samples; else if (S != null) S.Samples = samples; }
+
+        internal static int GetDiscountTotal() => ClientMode ? _cDiscount : (S != null ? S.Discount : 0);
+        internal static void SetDiscountTotal(int discount) { if (ClientMode) _cDiscount = discount; else if (S != null) S.Discount = discount; }
     }
 }

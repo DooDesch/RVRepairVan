@@ -23,24 +23,29 @@ namespace RVRepairVan.Net
         RequestSnapshot = 10,
         AskDonna = 11,
         CheckedRv = 12,   // client reached the post-repair "check on the RV" spot
+        ErrandItemPicked = 13,   // client now HOLDS the current errand item (Ming's crate / Marco's package)
 
         // host -> all clients state (absolute values, idempotent on re-receive)
         StageSync = 100,      // A = stage, B = discount total
         RepairApplied = 101,
-        TransientSync = 102,  // A = flags (1=pickupActive, 2=hasPackage), B = active dead-drop index (-1 = none)
+        TransientSync = 102,  // A = flags (1=pickupActive, 2=hasPackage); B = drop world X, C = drop world Z (0,0 = none)
         Ping = 200,   // connectivity / latency ping
+#if DEBUG
+        DebugGiveItems = 201,   // DEBUG: host -> clients, spawn packaged test products into each client's inventory
+#endif
     }
 
-    /// <summary>A decoded bus message. Carried as the guid string "RVRV:&lt;op&gt;:&lt;a&gt;:&lt;b&gt;".</summary>
+    /// <summary>A decoded bus message. Carried as the guid string "RVRV:&lt;op&gt;:&lt;a&gt;:&lt;b&gt;:&lt;c&gt;".</summary>
     internal struct RvMsg
     {
         internal const string Prefix = "RVRV:";
 
         internal RvOp Op;
-        internal int A;   // primary arg (stage, discount, ping value...)
-        internal int B;   // secondary arg
+        internal int A;   // primary arg (stage, discount, flags, ping value...)
+        internal int B;   // secondary arg (discount, drop X...)
+        internal int C;   // tertiary arg (drop Z...)
 
-        internal static string Encode(RvOp op, int a = 0, int b = 0) => Prefix + (int)op + ":" + a + ":" + b;
+        internal static string Encode(RvOp op, int a = 0, int b = 0, int c = 0) => Prefix + (int)op + ":" + a + ":" + b + ":" + c;
 
         internal static bool TryDecode(string guid, out RvMsg msg)
         {
@@ -53,11 +58,12 @@ namespace RVRepairVan.Net
                 msg.Op = (RvOp)op;
                 if (p.Length > 1) int.TryParse(p[1], out msg.A);
                 if (p.Length > 2) int.TryParse(p[2], out msg.B);
+                if (p.Length > 3) int.TryParse(p[3], out msg.C);
                 return true;
             }
             catch { return false; }
         }
 
-        public override string ToString() => Op + "(" + A + "," + B + ")";
+        public override string ToString() => Op + "(" + A + "," + B + "," + C + ")";
     }
 }
