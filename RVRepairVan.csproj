@@ -56,6 +56,14 @@
     <Compile Remove="Compat/GlobalUsings.Mono.cs" Condition="'$(Backend)' != 'mono'" />
   </ItemGroup>
 
+  <!-- CI checks out the shared Workspace repo as a SUBFOLDER of this project, so the SDK's default **/*.cs glob
+       would sweep in Workspace/ui, Workspace/build, etc. (uGUI design-system source this mod does not use).
+       RVRepairVan compiles only its own source - exclude everything under Workspace. No-op locally, where
+       Workspace is a sibling folder. Anything actually needed (e.g. the Snitch shim) is linked explicitly via props. -->
+  <ItemGroup>
+    <Compile Remove="Workspace/**/*.cs" />
+  </ItemGroup>
+
   <!-- Mod loader references (both backends) -->
   <ItemGroup>
     <Reference Include="MelonLoader">
