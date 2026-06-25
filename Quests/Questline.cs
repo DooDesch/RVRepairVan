@@ -167,6 +167,9 @@ namespace RVRepairVan.Quests
             Stage = n;
             SyncEntry();
             Core.Log.Msg("[Debug] rvstage -> Stage=" + n + " (host=" + NetworkBus.IsServer + ")");
+#if SNITCH
+            Snitch.Api.Profiler.Log("RVRepairVan", "rvstage -> Stage=" + n + " (host=" + NetworkBus.IsServer + ").");
+#endif
         }
 
         // Debug: forget the reserved errand drops so the host re-reserves a FRESH one (nearest empty to the NPC) on
@@ -652,6 +655,9 @@ namespace RVRepairVan.Quests
                             Stage = Paid;
                             SyncEntry();   // objective -> Check on the RV
                             Core.Log.Msg("[Questline] RV repaired for " + MoneyManager.FormatAmount(paid) + ".");
+#if SNITCH
+                            Snitch.Api.Profiler.Log("RVRepairVan", "RV repaired for " + MoneyManager.FormatAmount(paid) + " (stage -> Paid).");
+#endif
                         }
                     },
                     () => WorldSay(_marcoT, "There she is - back from the dead. Go take a look, and try not to total her again."),

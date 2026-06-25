@@ -49,7 +49,7 @@ namespace RVRepairVan.Patches
             catch (Exception e) { Core.Log.Warning("[Debug] console cmd failed: " + e.Message); return false; }
         }
 
-        private static void ClearErrandItems()
+        internal static void ClearErrandItems()
         {
             try
             {
@@ -67,7 +67,7 @@ namespace RVRepairVan.Patches
             catch (Exception e) { Core.Log.Warning("[Debug] rvclear failed: " + e.Message); }
         }
 
-        private static void DumpDrops()
+        internal static void DumpDrops()
         {
             try
             {
