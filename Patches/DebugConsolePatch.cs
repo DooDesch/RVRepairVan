@@ -10,43 +10,76 @@ namespace RVRepairVan.Patches
     /// quality into the inventory, so the Marco sample / quality-multiplier flow can be tested without manually
     /// equipping + setquality + packageproduct each one (packageproduct only works on the equipped-in-hand item).
     /// Usage: <c>rvtest</c> (jar OG Kush) or <c>rvtest &lt;packaging&gt; &lt;productId&gt;</c>. Compiled out of Release.
+    ///
+    /// Both Console.SubmitCommand overloads are patched (string + List&lt;string&gt;): the real console UI and
+    /// scripted submitters call the string overload, but depending on build/config either overload may be the
+    /// one whose managed prefix actually fires, so catching both is the reliable path (mirrors the Litterally /
+    /// Siesta / Snitch / Hotline console patches). Dispatch dedupes per frame so a command with side effects
+    /// (rvstage / rvtest) is never applied twice when both prefixes fire for a single submission.
     /// </summary>
-    [HarmonyPatch(typeof(Il2CppScheduleOne.Console), nameof(Il2CppScheduleOne.Console.SubmitCommand), new Type[] { typeof(Il2CppSystem.Collections.Generic.List<string>) })]
     internal static class DebugConsolePatch
     {
         private static readonly EQuality[] Qualities =
             { EQuality.Trash, EQuality.Poor, EQuality.Standard, EQuality.Premium, EQuality.Heavenly };
 
-        private static bool Prefix(Il2CppSystem.Collections.Generic.List<string> args)
+        internal static bool TryHandle(string raw)
         {
+            if (string.IsNullOrWhiteSpace(raw)) return false;
+            return Dispatch(raw.Trim().Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries));
+        }
+
+        internal static bool TryHandle(Il2CppSystem.Collections.Generic.List<string> args)
+        {
+            if (args == null || args.Count == 0) return false;
+            string[] parts = new string[args.Count];
+            for (int i = 0; i < args.Count; i++) parts[i] = args[i];
+            return Dispatch(parts);
+        }
+
+        private static int _lastFrame = -1;
+        private static string _lastSig = "";
+
+        /// <summary>Returns true if the command was one of ours (and should be swallowed), false to let the game handle it.</summary>
+        private static bool Dispatch(string[] parts)
+        {
+            if (parts.Length == 0) return false;
+            string cmd = parts[0].ToLower();
+            if (cmd != "rvtest" && cmd != "rvstage" && cmd != "rvdrops" && cmd != "rvclear" && cmd != "rvgiveclient")
+                return false;   // not ours - let the game handle it
+
+            // Both overloads can fire for a single submission (the string body calls the List body), so run the
+            // side effects once per identical command+frame and swallow the duplicate.
+            string sig = string.Join(" ", parts);
+            int frame = Time.frameCount;
+            if (frame == _lastFrame && sig == _lastSig) return true;   // already handled this frame
+            _lastFrame = frame; _lastSig = sig;
+
             try
             {
-                if (args == null || args.Count == 0) return true;   // not ours - let the game handle it
-                switch (args[0].ToLower())
+                switch (cmd)
                 {
                     case "rvtest":
-                        GiveTestProducts(args.Count > 1 ? args[1] : "jar", args.Count > 2 ? args[2] : "ogkush");
-                        return false;
+                        GiveTestProducts(parts.Length > 1 ? parts[1] : "jar", parts.Length > 2 ? parts[2] : "ogkush");
+                        break;
                     case "rvstage":   // skip errands while testing - run ON THE HOST (it broadcasts to clients)
-                        if (args.Count > 1 && int.TryParse(args[1], out int st)) RVRepairVan.Quests.Questline.DebugSetStage(st);
+                        if (parts.Length > 1 && int.TryParse(parts[1], out int st)) RVRepairVan.Quests.Questline.DebugSetStage(st);
                         else Core.Log.Warning("[Debug] rvstage <n>  (1=Start 5=Referred 6=MarcoMet 7=ReadyToPay 8=Trusted 9=Paid). Run on the HOST.");
-                        return false;
+                        break;
                     case "rvdrops":   // dump every dead drop: name, position, empty? - to diagnose the pickup drop
                         DumpDrops();
-                        return false;
+                        break;
                     case "rvclear":   // wipe accumulated test crates/packages from ALL drops + re-reserve a fresh one
                         ClearErrandItems();
                         RVRepairVan.Quests.Questline.DebugResetErrandDrop();
-                        return false;
+                        break;
                     case "rvgiveclient":   // host: tell every CLIENT to spawn packaged test products (jar OG Kush)
                         RVRepairVan.Net.NetworkBus.BroadcastToAll(RVRepairVan.Net.RvOp.DebugGiveItems);
                         Core.Log.Msg("[Debug] rvgiveclient: broadcast DebugGiveItems to clients (run this on the HOST).");
-                        return false;
-                    default:
-                        return true;   // not one of ours - let the game handle it
+                        break;
                 }
             }
-            catch (Exception e) { Core.Log.Warning("[Debug] console cmd failed: " + e.Message); return false; }
+            catch (Exception e) { Core.Log.Warning("[Debug] console cmd failed: " + e.Message); }
+            return true;   // ours - swallow it either way
         }
 
         internal static void ClearErrandItems()
@@ -107,6 +140,24 @@ namespace RVRepairVan.Patches
                 given++;
             }
             Core.Log.Msg("[Debug] rvtest: gave " + given + " packaged " + def.Name + " (" + pkg.Name + ") - one per quality.");
+        }
+    }
+
+    [HarmonyPatch(typeof(Il2CppScheduleOne.Console), nameof(Il2CppScheduleOne.Console.SubmitCommand), new Type[] { typeof(string) })]
+    internal static class Rv_Console_SubmitCommand_String_Patch
+    {
+        private static bool Prefix(string args)
+        {
+            try { return !DebugConsolePatch.TryHandle(args); } catch { return true; }
+        }
+    }
+
+    [HarmonyPatch(typeof(Il2CppScheduleOne.Console), nameof(Il2CppScheduleOne.Console.SubmitCommand), new Type[] { typeof(Il2CppSystem.Collections.Generic.List<string>) })]
+    internal static class Rv_Console_SubmitCommand_List_Patch
+    {
+        private static bool Prefix(Il2CppSystem.Collections.Generic.List<string> args)
+        {
+            try { return !DebugConsolePatch.TryHandle(args); } catch { return true; }
         }
     }
 }

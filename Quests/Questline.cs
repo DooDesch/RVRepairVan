@@ -165,11 +165,24 @@ namespace RVRepairVan.Quests
         internal static void DebugSetStage(int n)
         {
             Stage = n;
-            SyncEntry();
+            // Materialize the journal quest (+ its POI marker) for active stages, so jumping straight to a stage
+            // is actually testable in one command. The quest entry is added on a later event (see RepairQuest.HasEntry),
+            // so ensure-then-sync has to wait for it - plain SyncEntry on a just-created quest no-ops.
+            if (n >= Started && n < Done) MelonCoroutines.Start(DebugEnsureQuestThenSync());
+            else SyncEntry();
             Core.Log.Msg("[Debug] rvstage -> Stage=" + n + " (host=" + NetworkBus.IsServer + ")");
 #if SNITCH
             Snitch.Api.Profiler.Log("RVRepairVan", "rvstage -> Stage=" + n + " (host=" + NetworkBus.IsServer + ").");
 #endif
+        }
+
+        // Create the quest if needed, then wait for its entry to be added (OnCreated fires a frame or two later)
+        // before syncing the objective + POI, so a single rvstage fully sets up the marker.
+        private static IEnumerator DebugEnsureQuestThenSync()
+        {
+            RepairQuest.StartIfNeeded();
+            for (int i = 0; i < 60 && !RepairQuest.HasEntry(); i++) yield return null;
+            SyncEntry();
         }
 
         // Debug: forget the reserved errand drops so the host re-reserves a FRESH one (nearest empty to the NPC) on
@@ -1144,31 +1157,36 @@ namespace RVRepairVan.Quests
         private static void SyncEntry()
         {
             string title;
+            string npcId = null;   // set when the marker should follow an NPC live instead of a fixed point
             Vector3 poi;
 
             if (_pickupActive)
             {
                 title = _hasPackage ? "Bring Marco's package back" : "Pick up Marco's package from the dead drop";
-                poi = _hasPackage ? MarcoPos() : _dropPoint;
+                if (_hasPackage) { npcId = MarcoId; poi = MarcoPos(); } else poi = _dropPoint;
             }
             else
             {
                 switch (Stage)
                 {
-                    case Started:    title = "Ask the motel manager about the RV"; poi = DonnaPos(); break;
-                    case AskedDonna: title = "Talk to Mrs. Ming at the Chinese restaurant"; poi = MingPos(); break;
+                    case Started:    title = "Ask the motel manager about the RV"; npcId = DonnaId; poi = DonnaPos(); break;
+                    case AskedDonna: title = "Talk to Mrs. Ming at the Chinese restaurant"; npcId = MingId; poi = MingPos(); break;
                     case MingErrand: title = "Pick up Ming's crate from the dead drop"; poi = _cratePoint; break;
-                    case MingCrate:  title = "Bring Ming's crate back to Mrs. Ming"; poi = MingPos(); break;
-                    case Referred:   title = "Talk to Marco at the body shop"; poi = MarcoPos(); break;
-                    case MarcoMet:   title = "Tell Marco Mrs. Ming sent you"; poi = MarcoPos(); break;
+                    case MingCrate:  title = "Bring Ming's crate back to Mrs. Ming"; npcId = MingId; poi = MingPos(); break;
+                    case Referred:   title = "Talk to Marco at the body shop"; npcId = MarcoId; poi = MarcoPos(); break;
+                    case MarcoMet:   title = "Tell Marco Mrs. Ming sent you"; npcId = MarcoId; poi = MarcoPos(); break;
                     case ReadyToPay:
-                    case Trusted:    title = "Pay Marco for the repair"; poi = MarcoPos(); break;
+                    case Trusted:    title = "Pay Marco for the repair"; npcId = MarcoId; poi = MarcoPos(); break;
                     case Paid:       title = "Check on the RV"; poi = RvPos(); break;
                     default:         title = "Find a way to repair your RV"; poi = RvPos(); break;
                 }
             }
 
-            RepairQuest.UpdateEntry(title, poi);
+            // NPC stages: bind the marker to the NPC's live transform so it tracks them while they roam,
+            // instead of freezing wherever they happened to be when the stage advanced. poi is the fallback
+            // if the NPC can't be resolved yet.
+            if (npcId != null) RepairQuest.UpdateEntry(title, FindNpc(npcId), poi);
+            else RepairQuest.UpdateEntry(title, poi);
 
             // Host: re-broadcast the transient pickup/drop state on every entry change so clients render the same
             // objective text + dead-drop marker (clients reuse this exact SyncEntry, driven by the synced flags).

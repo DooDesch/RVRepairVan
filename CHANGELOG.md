@@ -4,6 +4,13 @@ All notable changes to RVRepairVan are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 project adheres to Semantic Versioning.
 
+## [2.2.1] - 2026-07-01
+
+### Fixed
+- The quest marker now tracks Marco, Mrs. Ming and Donna as they move around town, instead of
+  freezing at wherever the target happened to be standing when the objective updated. Following
+  the marker now leads you straight to the right person even while they walk their daily route.
+
 ## [2.2.0] - 2026-06-24
 
 ### Fixed
